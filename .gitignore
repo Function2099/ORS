@@ -1,0 +1,9 @@
+# Local-only tree: put build outputs, IDE caches, personal notes, etc. here.
+# Tracked exception: ignore/README.md (explains the convention).
+/ignore/**
+!/ignore/README.md
+
+# OS junk that may appear outside ignore/
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,15 @@
+Open Recording Software (ORS)
+=============================
+
+ORS application code is licensed under the MIT License (see LICENSE).
+
+Third-party components
+----------------------
+
+Qt 6
+  License: GNU Lesser General Public License v3 (LGPL v3)
+  Usage: dynamically linked
+  Source: https://www.qt.io/download
+
+Windows SDK APIs (DXGI, WASAPI, Media Foundation, Windows Graphics Capture)
+  License: Microsoft Windows SDK license terms
