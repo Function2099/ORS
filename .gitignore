@@ -7,3 +7,9 @@
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Local CMake overrides (Qt prefix, extra cache vars)
+/CMakeUserPresets.json
+
+# Tool logs that belong under ignore/ if kept
+/aqtinstall.log

@@ -9,10 +9,110 @@ project(ORS
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Phase 0: project layout only.
-# TODO: find_package(Qt6), add_executable, platform sources, tests.
-#
-# Preferred local build dir (gitignored): ignore/build
-#   cmake -B ignore/build -S .
-#   cmake --build ignore/build
+if(MSVC)
+    add_compile_options(/utf-8 /W4)
+else()
+    add_compile_options(-Wall -Wextra)
+endif()
+
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets LinguistTools)
+
+set(ORS_SOURCES
+    src/main.cpp
+    src/ui/MainWindow.cpp
+    src/ui/MainWindow.h
+    src/ui/ToolbarIcons.cpp
+    src/ui/ToolbarIcons.h
+    src/ui/SettingsDialog.cpp
+    src/ui/SettingsDialog.h
+    src/core/Config.cpp
+    src/core/Config.h
+    src/core/FrameQueue.h
+    src/core/RecordingSession.cpp
+    src/core/RecordingSession.h
+    src/core/VideoFrame.h
+    src/core/AudioFrame.h
+    src/core/EncodedPacket.h
+    src/capture/ICapture.h
+    src/audio/IAudioCapture.h
+    src/mux/IMuxer.h
+    src/encode/IEncoder.h
+    resources/ors.qrc
+)
+
+qt_add_executable(ORS WIN32 ${ORS_SOURCES})
+
+target_include_directories(ORS PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(ORS PRIVATE
+    Qt6::Widgets
+)
+
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/resources/i18n/ors_zh_TW.ts
+    ${CMAKE_SOURCE_DIR}/resources/i18n/ors_en.ts
+    PROPERTIES OUTPUT_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/i18n
+)
+qt_add_lrelease(ORS
+    TS_FILES
+        ${CMAKE_SOURCE_DIR}/resources/i18n/ors_zh_TW.ts
+        ${CMAKE_SOURCE_DIR}/resources/i18n/ors_en.ts
+    QM_FILES_OUTPUT_VARIABLE ORS_QM_FILES
+)
+qt_add_resources(ORS ors_i18n
+    PREFIX "/i18n"
+    BASE ${CMAKE_CURRENT_BINARY_DIR}/i18n
+    FILES ${ORS_QM_FILES}
+)
+
+if(WIN32)
+    get_target_property(_ors_qmake Qt6::qmake IMPORTED_LOCATION)
+    if(_ors_qmake)
+        get_filename_component(_ors_qt_bin "${_ors_qmake}" DIRECTORY)
+        find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${_ors_qt_bin}")
+        if(WINDEPLOYQT_EXECUTABLE)
+            add_custom_command(TARGET ORS POST_BUILD
+                COMMAND "${WINDEPLOYQT_EXECUTABLE}"
+                    --no-translations
+                    --no-system-d3d-compiler
+                    "$<TARGET_FILE:ORS>"
+                COMMENT "Deploying Qt runtime next to ORS.exe"
+            )
+        endif()
+    endif()
+endif()
+
+enable_testing()
+
+include(FetchContent)
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.8.1
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(Catch2)
+
+add_executable(ors_tests
+    tests/main.cpp
+    tests/test_config.cpp
+    tests/test_frame_queue.cpp
+    src/core/Config.cpp
+)
+
+target_include_directories(ors_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(ors_tests PRIVATE
+    Catch2::Catch2
+    Qt6::Core
+)
+
+add_test(NAME ors_tests COMMAND ors_tests)

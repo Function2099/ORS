@@ -1,0 +1,49 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "windows-release",
+            "displayName": "Windows MSVC Release (Ninja)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/ignore/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_PREFIX_PATH": "$env{CMAKE_PREFIX_PATH}"
+            }
+        },
+        {
+            "name": "windows-debug",
+            "displayName": "Windows MSVC Debug (Ninja)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/ignore/build-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_PREFIX_PATH": "$env{CMAKE_PREFIX_PATH}"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-release",
+            "configurePreset": "windows-release"
+        },
+        {
+            "name": "windows-debug",
+            "configurePreset": "windows-debug"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "windows-release",
+            "configurePreset": "windows-release",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

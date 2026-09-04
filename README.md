@@ -4,7 +4,19 @@ A lightweight, high-performance, open-source cross-platform screen recorder.
 
 ## Status
 
-Early scaffolding — implementation starts at Phase 0 (Bootstrap).
+Phase 0 (Bootstrap): Windows shell builds and runs. Recording is not implemented yet.
+
+## Build
+
+See [docs/building.md](docs/building.md). Short version (VS x64 developer prompt):
+
+```powershell
+$env:CMAKE_PREFIX_PATH = "C:/Qt/6.8.3/msvc2022_64"
+cmake --preset windows-release
+cmake --build ignore/build
+```
+
+The GUI is `ignore/build/ORS.exe` after `windeployqt`.
 
 ## Local-only files
 
@@ -21,8 +33,8 @@ Put build outputs and personal scratch files under [`ignore/`](ignore/README.md)
 ## Documentation
 
 - [Project plan](screen-recorder-plan.md) (Traditional Chinese)
-- [Building](docs/building.md) (coming soon)
-- [Architecture](docs/architecture.md) (coming soon)
+- [Building](docs/building.md)
+- [Architecture](docs/architecture.md)
 
 ## License
 
