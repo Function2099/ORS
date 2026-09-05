@@ -13,6 +13,7 @@ struct EncoderSettings {
     int height{};
     int frameRate{30};
     int bitrateKbps{8000};
+    int keyframeGopFrames{0};
     QString codec{QStringLiteral("h264")};
 };
 

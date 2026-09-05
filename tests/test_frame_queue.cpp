@@ -1,6 +1,7 @@
 #include "core/FrameQueue.h"
 #include "core/VideoFrame.h"
 
+#include <chrono>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
@@ -46,6 +47,18 @@ TEST_CASE("FrameQueue drops oldest when full")
     REQUIRE(out.width == 2);
     REQUIRE(queue.pop(out));
     REQUIRE(out.width == 3);
+}
+
+TEST_CASE("FrameQueue waitPop times out on empty queue")
+{
+    ors::FrameQueue<int> queue(1);
+    int value = -1;
+    REQUIRE_FALSE(queue.waitPop(value, std::chrono::milliseconds(5)));
+    REQUIRE(value == -1);
+
+    queue.push(7);
+    REQUIRE(queue.waitPop(value, std::chrono::milliseconds(5)));
+    REQUIRE(value == 7);
 }
 
 TEST_CASE("FrameQueue clear empties without resetting dropped count")

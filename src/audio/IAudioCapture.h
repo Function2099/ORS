@@ -9,6 +9,7 @@ namespace ors {
 struct AudioCaptureSettings {
     bool systemAudio{true};
     QString microphoneId;
+    QString inputSource{QStringLiteral("stereo")};
     int sampleRate{48000};
     int channels{2};
 };

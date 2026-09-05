@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -26,6 +28,7 @@ public:
             ++dropped_;
         }
         queue_.push_back(std::move(frame));
+        cv_.notify_one();
     }
 
     bool pop(T& out)
@@ -37,6 +40,27 @@ public:
         out = std::move(queue_.front());
         queue_.pop_front();
         return true;
+    }
+
+    bool waitPop(T& out, std::chrono::milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cv_.wait_for(lock, timeout, [this] { return !queue_.empty() || stopping_; })) {
+            return false;
+        }
+        if (queue_.empty()) {
+            return false;
+        }
+        out = std::move(queue_.front());
+        queue_.pop_front();
+        return true;
+    }
+
+    void wake()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = true;
+        cv_.notify_all();
     }
 
     std::size_t size() const
@@ -63,7 +87,9 @@ private:
     std::size_t capacity_;
     std::deque<T> queue_;
     std::uint64_t dropped_{0};
+    bool stopping_{false};
     mutable std::mutex mutex_;
+    std::condition_variable cv_;
 };
 
 } // namespace ors

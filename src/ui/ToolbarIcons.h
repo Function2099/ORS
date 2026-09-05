@@ -6,6 +6,8 @@
 namespace ors {
 
 enum class ToolbarGlyph {
+    Record,
+    Stop,
     Capture,
     Region,
     Open,

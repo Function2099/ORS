@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 
+#include <algorithm>
 #include <utility>
 
 namespace ors {
@@ -71,6 +72,59 @@ QString Config::resolvedOutputDirectory(const ConfigData& data)
     return QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
 }
 
+int Config::videoBitrateKbps(const ConfigData& data, int width, int height)
+{
+    const int fps = std::clamp(data.frameRate, 1, 120);
+    const int base = std::max(4000, std::max(1, width) * std::max(1, height) * fps / 8000);
+    if (data.videoQuality == QLatin1String("custom")) {
+        return std::clamp(data.customBitrateKbps, 500, 100000);
+    }
+    if (data.videoQuality == QLatin1String("very-high")) {
+        return std::max(6000, base * 3 / 2);
+    }
+    if (data.videoQuality == QLatin1String("medium")) {
+        return std::max(2000, base * 3 / 5);
+    }
+    if (data.videoQuality == QLatin1String("low")) {
+        return std::max(1000, base / 3);
+    }
+    return base;
+}
+
+int Config::gopFrameCount(const ConfigData& data)
+{
+    const int fps = std::clamp(data.frameRate, 1, 120);
+    const int seconds = std::clamp(data.keyframeInterval, 1, 30);
+    return std::clamp(seconds * fps, 1, 3600);
+}
+
+QString Config::normalizedCaptureImageFormat(const QString& format)
+{
+    const QString lower = format.trimmed().toLower();
+    if (lower == QLatin1String("jpg") || lower == QLatin1String("jpeg")) {
+        return QStringLiteral("jpg");
+    }
+    if (lower == QLatin1String("bmp")) {
+        return QStringLiteral("bmp");
+    }
+    return QStringLiteral("png");
+}
+
+void Config::alignCaptureSize(const ConfigData& data, int& width, int& height)
+{
+    int alignW = 2;
+    int alignH = 2;
+    if (data.resolutionAlign == QLatin1String("8x4")) {
+        alignW = 8;
+        alignH = 4;
+    } else if (data.resolutionAlign == QLatin1String("16x16")) {
+        alignW = 16;
+        alignH = 16;
+    }
+    width = std::max(alignW, width / alignW * alignW);
+    height = std::max(alignH, height / alignH * alignH);
+}
+
 QString Config::effectivePath(const QString& path) const
 {
     return path.isEmpty() ? defaultFilePath() : path;
@@ -105,11 +159,23 @@ bool Config::load(const QString& path)
     const QJsonObject output = objectOrEmpty(root, "output");
     next.directory = readString(output, "directory", next.directory);
     next.filenameTemplate = readString(output, "filenameTemplate", next.filenameTemplate);
+    if (next.filenameTemplate == QLatin1String("ORS_yyyyMMdd_HHmmss")) {
+        next.filenameTemplate = QStringLiteral("<Prefix>_<YYYY_MM_DD_HH_NN_SS_Z>");
+    }
+    next.filenamePrefix = readString(output, "filenamePrefix", next.filenamePrefix);
+    next.filenameStartNumber = std::max(1, readInt(output, "filenameStartNumber", next.filenameStartNumber));
 
     const QJsonObject region = objectOrEmpty(root, "region");
     next.regionPreset = readString(region, "preset", next.regionPreset);
     next.customWidth = readInt(region, "customWidth", next.customWidth);
     next.customHeight = readInt(region, "customHeight", next.customHeight);
+    const auto xIt = region.constFind(QLatin1String("customX"));
+    const auto yIt = region.constFind(QLatin1String("customY"));
+    if (xIt != region.constEnd() && yIt != region.constEnd()) {
+        next.hasCustomPosition = true;
+        next.customX = readInt(region, "customX", next.customX);
+        next.customY = readInt(region, "customY", next.customY);
+    }
     const auto savedIt = region.constFind(QLatin1String("saved"));
     if (savedIt != region.constEnd() && savedIt->isArray()) {
         for (const QJsonValue& value : savedIt->toArray()) {
@@ -133,10 +199,38 @@ bool Config::load(const QString& path)
     const QJsonObject audio = objectOrEmpty(root, "audio");
     next.systemAudio = readBool(audio, "system", next.systemAudio);
     next.microphoneId = readString(audio, "microphoneId", next.microphoneId);
+    next.microphoneInputSource = readString(
+        audio, "microphoneInputSource", next.microphoneInputSource);
+    if (next.microphoneInputSource.compare(QLatin1String("left"), Qt::CaseInsensitive) != 0
+        && next.microphoneInputSource.compare(QLatin1String("right"), Qt::CaseInsensitive) != 0) {
+        next.microphoneInputSource = QStringLiteral("stereo");
+    } else {
+        next.microphoneInputSource = next.microphoneInputSource.toLower();
+    }
 
     const QJsonObject hotkeys = objectOrEmpty(root, "hotkeys");
     next.toggleRecord = readString(hotkeys, "toggleRecord", next.toggleRecord);
     next.togglePause = readString(hotkeys, "togglePause", next.togglePause);
+
+    const QJsonObject recording = objectOrEmpty(root, "recording");
+    next.includeCursor = readBool(recording, "includeCursor", next.includeCursor);
+    next.alwaysOnTop = readBool(recording, "alwaysOnTop", next.alwaysOnTop);
+    next.useTrayIcon = readBool(recording, "useTrayIcon", next.useTrayIcon);
+    next.hideWhenMinimized = readBool(recording, "hideWhenMinimized", next.hideWhenMinimized);
+    next.hideOnStartup = readBool(recording, "hideOnStartup", next.hideOnStartup);
+    next.frameRate = std::clamp(readInt(recording, "frameRate", next.frameRate), 1, 120);
+    next.videoQuality = readString(recording, "quality", next.videoQuality);
+    next.customBitrateKbps = std::clamp(
+        readInt(recording, "customBitrateKbps", next.customBitrateKbps), 500, 100000);
+    next.keyframeInterval = std::clamp(
+        readInt(recording, "keyframeInterval", next.keyframeInterval), 1, 30);
+    next.resolutionAlign = readString(recording, "resolutionAlign", next.resolutionAlign);
+    next.frameRateMode = readString(recording, "frameRateMode", next.frameRateMode);
+
+    const QJsonObject capture = objectOrEmpty(root, "capture");
+    next.captureIncludeCursor = readBool(capture, "includeCursor", next.captureIncludeCursor);
+    next.captureImageFormat = normalizedCaptureImageFormat(
+        readString(capture, "imageFormat", next.captureImageFormat));
 
     data_ = std::move(next);
     return true;
@@ -157,6 +251,8 @@ bool Config::save(const QString& path) const
     QJsonObject output;
     output.insert(QStringLiteral("directory"), data_.directory);
     output.insert(QStringLiteral("filenameTemplate"), data_.filenameTemplate);
+    output.insert(QStringLiteral("filenamePrefix"), data_.filenamePrefix);
+    output.insert(QStringLiteral("filenameStartNumber"), data_.filenameStartNumber);
 
     QJsonArray saved;
     for (const SavedRegion& region : data_.savedRegions) {
@@ -169,6 +265,8 @@ bool Config::save(const QString& path) const
 
     QJsonObject region;
     region.insert(QStringLiteral("preset"), data_.regionPreset);
+    region.insert(QStringLiteral("customX"), data_.customX);
+    region.insert(QStringLiteral("customY"), data_.customY);
     region.insert(QStringLiteral("customWidth"), data_.customWidth);
     region.insert(QStringLiteral("customHeight"), data_.customHeight);
     region.insert(QStringLiteral("saved"), saved);
@@ -181,10 +279,28 @@ bool Config::save(const QString& path) const
     QJsonObject audio;
     audio.insert(QStringLiteral("system"), data_.systemAudio);
     audio.insert(QStringLiteral("microphoneId"), data_.microphoneId);
+    audio.insert(QStringLiteral("microphoneInputSource"), data_.microphoneInputSource);
 
     QJsonObject hotkeys;
     hotkeys.insert(QStringLiteral("toggleRecord"), data_.toggleRecord);
     hotkeys.insert(QStringLiteral("togglePause"), data_.togglePause);
+
+    QJsonObject recording;
+    recording.insert(QStringLiteral("includeCursor"), data_.includeCursor);
+    recording.insert(QStringLiteral("alwaysOnTop"), data_.alwaysOnTop);
+    recording.insert(QStringLiteral("useTrayIcon"), data_.useTrayIcon);
+    recording.insert(QStringLiteral("hideWhenMinimized"), data_.hideWhenMinimized);
+    recording.insert(QStringLiteral("hideOnStartup"), data_.hideOnStartup);
+    recording.insert(QStringLiteral("frameRate"), data_.frameRate);
+    recording.insert(QStringLiteral("quality"), data_.videoQuality);
+    recording.insert(QStringLiteral("customBitrateKbps"), data_.customBitrateKbps);
+    recording.insert(QStringLiteral("keyframeInterval"), data_.keyframeInterval);
+    recording.insert(QStringLiteral("resolutionAlign"), data_.resolutionAlign);
+    recording.insert(QStringLiteral("frameRateMode"), data_.frameRateMode);
+
+    QJsonObject capture;
+    capture.insert(QStringLiteral("includeCursor"), data_.captureIncludeCursor);
+    capture.insert(QStringLiteral("imageFormat"), normalizedCaptureImageFormat(data_.captureImageFormat));
 
     QJsonObject root;
     root.insert(QStringLiteral("version"), data_.version);
@@ -194,6 +310,8 @@ bool Config::save(const QString& path) const
     root.insert(QStringLiteral("codec"), codec);
     root.insert(QStringLiteral("audio"), audio);
     root.insert(QStringLiteral("hotkeys"), hotkeys);
+    root.insert(QStringLiteral("recording"), recording);
+    root.insert(QStringLiteral("capture"), capture);
 
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(ORS
-    VERSION 0.0.0
+    VERSION 0.1.0
     DESCRIPTION "Open Recording Software"
     LANGUAGES CXX
 )
@@ -25,12 +25,16 @@ set(ORS_SOURCES
     src/main.cpp
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/RegionOverlay.cpp
+    src/ui/RegionOverlay.h
     src/ui/ToolbarIcons.cpp
     src/ui/ToolbarIcons.h
     src/ui/SettingsDialog.cpp
     src/ui/SettingsDialog.h
     src/core/Config.cpp
     src/core/Config.h
+    src/core/FilenameTemplate.cpp
+    src/core/FilenameTemplate.h
     src/core/FrameQueue.h
     src/core/RecordingSession.cpp
     src/core/RecordingSession.h
@@ -39,8 +43,13 @@ set(ORS_SOURCES
     src/core/EncodedPacket.h
     src/capture/ICapture.h
     src/audio/IAudioCapture.h
+    src/audio/AudioMix.h
+    src/audio/AudioDevices.h
     src/mux/IMuxer.h
     src/encode/IEncoder.h
+    src/encode/ColorConvert.h
+    src/encode/MFEncoder.cpp
+    src/encode/MFEncoder.h
     resources/ors.qrc
 )
 
@@ -53,6 +62,30 @@ target_include_directories(ORS PRIVATE
 target_link_libraries(ORS PRIVATE
     Qt6::Widgets
 )
+
+if(WIN32)
+    target_sources(ORS PRIVATE
+        src/capture/CaptureWin.cpp
+        src/capture/CaptureWin.h
+        src/audio/AudioCaptureWin.cpp
+        src/audio/AudioCaptureWin.h
+        src/mux/Mp4Muxer.cpp
+        src/mux/Mp4Muxer.h
+    )
+    target_link_libraries(ORS PRIVATE
+        dxgi
+        d3d11
+        mf
+        mfplat
+        mfreadwrite
+        mfuuid
+        ole32
+        uuid
+        user32
+        gdi32
+        strmiids
+    )
+endif()
 
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/resources/i18n/ors_zh_TW.ts
@@ -103,7 +136,11 @@ add_executable(ors_tests
     tests/main.cpp
     tests/test_config.cpp
     tests/test_frame_queue.cpp
+    tests/test_color_convert.cpp
+    tests/test_filename_template.cpp
+    tests/test_audio_mix.cpp
     src/core/Config.cpp
+    src/core/FilenameTemplate.cpp
 )
 
 target_include_directories(ors_tests PRIVATE

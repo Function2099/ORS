@@ -22,6 +22,20 @@ QPen stroke(const QColor& color, qreal width = 1.8)
     return pen;
 }
 
+void paintRecord(QPainter& p, const QRectF& box, const QColor& color)
+{
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawEllipse(box.adjusted(5.5, 5.5, -5.5, -5.5));
+}
+
+void paintStop(QPainter& p, const QRectF& box, const QColor& color)
+{
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawRoundedRect(box.adjusted(6.2, 6.2, -6.2, -6.2), 2.2, 2.2);
+}
+
 void paintCapture(QPainter& p, const QRectF& box, const QColor& color)
 {
     const QRectF frame = box.adjusted(3.5, 4.5, -3.5, -4.5);
@@ -133,6 +147,12 @@ QIcon toolbarIcon(ToolbarGlyph glyph, int logicalSize, const QColor& color)
 
     const QRectF box(0, 0, logicalSize, logicalSize);
     switch (glyph) {
+    case ToolbarGlyph::Record:
+        paintRecord(painter, box, color);
+        break;
+    case ToolbarGlyph::Stop:
+        paintStop(painter, box, color);
+        break;
     case ToolbarGlyph::Capture:
         paintCapture(painter, box, color);
         break;

@@ -1,6 +1,6 @@
 # Building ORS
 
-Windows desktop build for Phase 0. Later phases keep the same CMake entry points.
+Windows desktop build for Phase 1. Later phases keep the same CMake entry points.
 
 ## Requirements
 
@@ -54,4 +54,4 @@ Visual Studio multi-config generators place the binary at `ignore/build/Release/
 | `ORS` | GUI application |
 | `ors_tests` | Catch2 tests (`Config`, `FrameQueue`) |
 
-Phase 1 will add Windows libraries (`dxgi`, `d3d11`, `mfplat`, `mfreadwrite`, `mfuuid`) when capture/encode/mux sources join the `ORS` target.
+Phase 1 links Windows libraries (`dxgi`, `d3d11`, `mf`, `mfplat`, `mfreadwrite`, `mfuuid`, `ole32`) for capture/encode/mux.

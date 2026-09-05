@@ -4,7 +4,7 @@ A lightweight, high-performance, open-source cross-platform screen recorder.
 
 ## Status
 
-Phase 0 (Bootstrap): Windows shell builds and runs. Recording is not implemented yet.
+Phase 1 (Core recording): Windows screen capture to H.264/AAC MP4. Press Record to start, Stop to finish. Files go to the system Videos folder (or the path in Settings).
 
 ## Build
 
@@ -22,13 +22,18 @@ The GUI is `ignore/build/ORS.exe` after `windeployqt`.
 
 Put build outputs and personal scratch files under [`ignore/`](ignore/README.md) (gitignored except that README).
 
-## Features (planned)
+## Features (Phase 1)
 
-- Screen recording (DXGI Desktop Duplication)
+- Screen recording (DXGI Desktop Duplication) to H.264/AAC MP4
+- Region screenshot to PNG, JPG, or BMP
+- Optional system audio (WASAPI loopback)
+- Hardware-accelerated encoding via Media Foundation when available
+
+Later phases:
+
 - Game/window recording (Windows Graphics Capture)
-- Audio recording
-- Hardware-accelerated H.264 encoding (Media Foundation)
-- MP4/WMV output; additional formats via custom muxers
+- Dedicated audio-only recording
+- WMV and custom muxers
 
 ## Documentation
 

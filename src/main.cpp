@@ -9,7 +9,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("ORS"));
     QApplication::setApplicationName(QStringLiteral("ORS"));
-    QApplication::setApplicationVersion(QStringLiteral("0.0.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
 
     ors::Config config;
     config.load();
@@ -23,6 +23,6 @@ int main(int argc, char* argv[])
     }
 
     ors::MainWindow window;
-    window.show();
+    window.present();
     return app.exec();
 }

@@ -18,11 +18,16 @@ struct ConfigData {
     QString lastTab{QStringLiteral("screen")};
 
     QString directory;
-    QString filenameTemplate{QStringLiteral("ORS_yyyyMMdd_HHmmss")};
+    QString filenameTemplate{QStringLiteral("<Prefix>_<YYYY_MM_DD_HH_NN_SS_Z>")};
+    QString filenamePrefix{QStringLiteral("錄製")};
+    int filenameStartNumber{1};
 
-    QString regionPreset{QStringLiteral("monitor-primary")};
-    int customWidth{1920};
-    int customHeight{1080};
+    QString regionPreset{QStringLiteral("custom")};
+    bool hasCustomPosition{false};
+    int customX{0};
+    int customY{0};
+    int customWidth{1280};
+    int customHeight{720};
     QVector<SavedRegion> savedRegions;
 
     QString container{QStringLiteral("mp4")};
@@ -31,15 +36,35 @@ struct ConfigData {
 
     bool systemAudio{true};
     QString microphoneId;
+    QString microphoneInputSource{QStringLiteral("stereo")};
 
     QString toggleRecord{QStringLiteral("F9")};
     QString togglePause{QStringLiteral("F10")};
+
+    bool includeCursor{true};
+    bool alwaysOnTop{false};
+    bool useTrayIcon{true};
+    bool hideWhenMinimized{false};
+    bool hideOnStartup{false};
+    int frameRate{60};
+    QString videoQuality{QStringLiteral("very-high")};
+    int customBitrateKbps{12000};
+    int keyframeInterval{5};
+    QString resolutionAlign{QStringLiteral("8x4")};
+    QString frameRateMode{QStringLiteral("vfr")};
+
+    bool captureIncludeCursor{true};
+    QString captureImageFormat{QStringLiteral("png")};
 };
 
 class Config {
 public:
     static QString defaultFilePath();
     static QString resolvedOutputDirectory(const ConfigData& data);
+    static int videoBitrateKbps(const ConfigData& data, int width, int height);
+    static int gopFrameCount(const ConfigData& data);
+    static void alignCaptureSize(const ConfigData& data, int& width, int& height);
+    static QString normalizedCaptureImageFormat(const QString& format);
 
     bool load(const QString& path = {});
     bool save(const QString& path = {}) const;

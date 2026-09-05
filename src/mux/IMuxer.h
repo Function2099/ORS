@@ -11,8 +11,11 @@ struct MuxerOpenParams {
     int videoWidth{};
     int videoHeight{};
     int videoFrameRate{30};
+    int videoBitrateKbps{8000};
+    int keyframeGopFrames{0};
     int audioSampleRate{48000};
     int audioChannels{2};
+    bool hasAudio{false};
 };
 
 class IMuxer {
