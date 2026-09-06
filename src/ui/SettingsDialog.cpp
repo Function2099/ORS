@@ -2,7 +2,9 @@
 
 #include "audio/AudioDevices.h"
 #include "core/FilenameTemplate.h"
+#include "ui/HotkeyRegistrar.h"
 
+#include <QAbstractButton>
 #include <QAbstractSpinBox>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -11,11 +13,15 @@
 #include <QDir>
 #include <QEasingCurve>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFocusEvent>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -24,11 +30,13 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStringList>
 #include <QTimer>
 #include <QToolButton>
 #include <QVariantAnimation>
@@ -251,7 +259,117 @@ QWidget* withDropButton(QComboBox* combo, QWidget* parent)
     return row;
 }
 
+enum TimeLimitActionId {
+    TimeLimitNone = 0,
+    TimeLimitRestart,
+    TimeLimitQuit,
+    TimeLimitShutdown,
+    TimeLimitSleep,
+};
+
+int timeLimitActionId(const QString& action)
+{
+    const QString normalized = Config::normalizedTimeLimitAction(action);
+    if (normalized == QLatin1String("restart")) {
+        return TimeLimitRestart;
+    }
+    if (normalized == QLatin1String("quit")) {
+        return TimeLimitQuit;
+    }
+    if (normalized == QLatin1String("shutdown")) {
+        return TimeLimitShutdown;
+    }
+    if (normalized == QLatin1String("sleep")) {
+        return TimeLimitSleep;
+    }
+    return TimeLimitNone;
+}
+
+QString timeLimitActionFromId(int id)
+{
+    switch (id) {
+    case TimeLimitRestart:
+        return QStringLiteral("restart");
+    case TimeLimitQuit:
+        return QStringLiteral("quit");
+    case TimeLimitShutdown:
+        return QStringLiteral("shutdown");
+    case TimeLimitSleep:
+        return QStringLiteral("sleep");
+    default:
+        return QStringLiteral("none");
+    }
+}
+
 } // namespace
+
+class HotkeyEdit : public QLineEdit {
+public:
+    explicit HotkeyEdit(QWidget* parent = nullptr)
+        : QLineEdit(parent)
+    {
+        setReadOnly(true);
+        setAlignment(Qt::AlignCenter);
+        setMinimumWidth(120);
+        setFocusPolicy(Qt::ClickFocus);
+    }
+
+    void setSequence(const QString& text)
+    {
+        const QString normalized = normalizeHotkey(text);
+        sequence_ = normalized.isEmpty() ? text.trimmed() : normalized;
+        setText(sequence_);
+    }
+
+    QString sequence() const { return sequence_; }
+
+protected:
+    void focusInEvent(QFocusEvent* event) override
+    {
+        QLineEdit::focusInEvent(event);
+        setText({});
+    }
+
+    void focusOutEvent(QFocusEvent* event) override
+    {
+        QLineEdit::focusOutEvent(event);
+        setText(sequence_);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        const int key = event->key();
+        if (key == Qt::Key_Control || key == Qt::Key_Shift || key == Qt::Key_Alt
+            || key == Qt::Key_Meta || key == Qt::Key_unknown) {
+            return;
+        }
+        if (key == Qt::Key_Escape) {
+            clearFocus();
+            event->accept();
+            return;
+        }
+        if (key == Qt::Key_Tab || key == Qt::Key_Backtab) {
+            QLineEdit::keyPressEvent(event);
+            return;
+        }
+        HotkeySpec spec;
+        spec.modifiers = event->modifiers()
+            & (Qt::ShiftModifier | Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
+        spec.key = static_cast<Qt::Key>(key);
+        const QString portable = hotkeyToPortableString(spec);
+        if (portable.isEmpty()) {
+            event->ignore();
+            return;
+        }
+        sequence_ = portable;
+        setText(sequence_);
+        clearFocus();
+        event->accept();
+    }
+
+private:
+    QString sequence_;
+};
 
 SettingsDialog::SettingsDialog(Config& config, QWidget* parent)
     : QDialog(parent)
@@ -462,12 +580,12 @@ SettingsDialog::SettingsDialog(Config& config, QWidget* parent)
     pages_->addWidget(createRecordPage());
     pages_->addWidget(createAudioPage());
     pages_->addWidget(createCapturePage());
-    pages_->addWidget(createComingSoonPage());
-    pages_->addWidget(createComingSoonPage());
+    pages_->addWidget(createGifPage());
+    pages_->addWidget(createHotkeysPage());
     pages_->addWidget(createSavePage());
-    pages_->addWidget(createComingSoonPage());
-    pages_->addWidget(createComingSoonPage());
-    pages_->addWidget(createComingSoonPage());
+    pages_->addWidget(createTimeLimitPage());
+    pages_->addWidget(createWatermarkPage());
+    pages_->addWidget(createPerformancePage());
     pages_->addWidget(createLanguagePage());
 
     auto* pageWrap = new QWidget(this);
@@ -517,7 +635,9 @@ SettingsDialog::SettingsDialog(Config& config, QWidget* parent)
     ok->setFocusPolicy(Qt::NoFocus);
     ok->setDefault(true);
     connect(ok, &QPushButton::clicked, this, [this] {
-        applyToConfig();
+        if (!applyToConfig()) {
+            return;
+        }
         accept();
     });
     auto* footerLayout = new QHBoxLayout(footer);
@@ -546,6 +666,11 @@ SettingsDialog::SettingsDialog(Config& config, QWidget* parent)
     loadRecordingFrom(config_.data());
     loadAudioFrom(config_.data());
     loadCaptureFrom(config_.data());
+    loadGifFrom(config_.data());
+    loadTimeLimitFrom(config_.data());
+    loadWatermarkFrom(config_.data());
+    loadPerformanceFrom(config_.data());
+    loadHotkeysFrom(config_.data());
     updatePreview();
 }
 
@@ -655,15 +780,339 @@ QWidget* SettingsDialog::createLanguagePage()
     return languagePage;
 }
 
-QWidget* SettingsDialog::createComingSoonPage()
+QWidget* SettingsDialog::createTimeLimitPage()
 {
     auto* page = new QWidget;
-    auto* note = new QLabel(tr("此頁面將於後續實作。"), page);
-    note->setObjectName(QStringLiteral("metaLabel"));
-    note->setWordWrap(true);
+    timeLimitEnabledCheck_ = new QCheckBox(tr("啟用"), page);
+    connect(timeLimitEnabledCheck_, &QCheckBox::toggled, this, &SettingsDialog::syncTimeLimitEnabled);
+
+    auto* durationLabel = new QLabel(tr("錄製時間限制"), page);
+    durationLabel->setObjectName(QStringLiteral("sectionLabel"));
+
+    timeLimitDurationCard_ = new QWidget(page);
+    timeLimitDurationCard_->setObjectName(QStringLiteral("videoCard"));
+    timeLimitMinutesSpin_ = new QSpinBox(timeLimitDurationCard_);
+    timeLimitMinutesSpin_->setRange(0, 999);
+    timeLimitMinutesSpin_->setMinimumWidth(72);
+    timeLimitSecondsSpin_ = new QSpinBox(timeLimitDurationCard_);
+    timeLimitSecondsSpin_->setRange(0, 59);
+    timeLimitSecondsSpin_->setMinimumWidth(72);
+
+    auto* minLabel = new QLabel(tr("分"), timeLimitDurationCard_);
+    minLabel->setAlignment(Qt::AlignHCenter);
+    auto* secLabel = new QLabel(tr("秒"), timeLimitDurationCard_);
+    secLabel->setAlignment(Qt::AlignHCenter);
+
+    auto* durationGrid = new QGridLayout(timeLimitDurationCard_);
+    durationGrid->setContentsMargins(12, 12, 12, 12);
+    durationGrid->setHorizontalSpacing(16);
+    durationGrid->setVerticalSpacing(6);
+    durationGrid->addWidget(withStepButtons(timeLimitMinutesSpin_, timeLimitDurationCard_), 0, 0);
+    durationGrid->addWidget(withStepButtons(timeLimitSecondsSpin_, timeLimitDurationCard_), 0, 1);
+    durationGrid->addWidget(minLabel, 1, 0);
+    durationGrid->addWidget(secLabel, 1, 1);
+    durationGrid->setColumnStretch(0, 1);
+    durationGrid->setColumnStretch(1, 1);
+
+    auto* optionsLabel = new QLabel(tr("選項"), page);
+    optionsLabel->setObjectName(QStringLiteral("sectionLabel"));
+
+    timeLimitOptionsCard_ = new QWidget(page);
+    timeLimitOptionsCard_->setObjectName(QStringLiteral("videoCard"));
+    timeLimitActionGroup_ = new QButtonGroup(timeLimitOptionsCard_);
+    timeLimitActionGroup_->setExclusive(true);
+
+    auto* optionsLayout = new QVBoxLayout(timeLimitOptionsCard_);
+    optionsLayout->setContentsMargins(12, 12, 12, 12);
+    optionsLayout->setSpacing(8);
+    const auto addAction = [this, optionsLayout](const QString& text, int id) {
+        auto* radio = new QRadioButton(text, timeLimitOptionsCard_);
+        timeLimitActionGroup_->addButton(radio, id);
+        optionsLayout->addWidget(radio);
+    };
+    addAction(tr("什麼都不做"), TimeLimitNone);
+    addAction(tr("開始新的錄製"), TimeLimitRestart);
+    addAction(tr("關閉程式"), TimeLimitQuit);
+    addAction(tr("關機"), TimeLimitShutdown);
+    addAction(tr("讓電腦休眠"), TimeLimitSleep);
+
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(16, 10, 16, 12);
-    layout->addWidget(note);
+    layout->setSpacing(8);
+    layout->addWidget(timeLimitEnabledCheck_);
+    layout->addSpacing(6);
+    layout->addWidget(durationLabel);
+    layout->addWidget(timeLimitDurationCard_);
+    layout->addSpacing(6);
+    layout->addWidget(optionsLabel);
+    layout->addWidget(timeLimitOptionsCard_);
+    layout->addStretch();
+    return page;
+}
+
+QWidget* SettingsDialog::createWatermarkPage()
+{
+    auto* page = new QWidget;
+    watermarkEnabledCheck_ = new QCheckBox(tr("啟用"), page);
+    connect(watermarkEnabledCheck_, &QCheckBox::toggled, this, &SettingsDialog::syncWatermarkEnabled);
+
+    auto* section = new QLabel(tr("浮水印"), page);
+    section->setObjectName(QStringLiteral("sectionLabel"));
+
+    watermarkCard_ = new QWidget(page);
+    watermarkCard_->setObjectName(QStringLiteral("videoCard"));
+
+    watermarkPathEdit_ = new QLineEdit(watermarkCard_);
+    watermarkPathEdit_->setPlaceholderText(tr("PNG、JPG 或 BMP"));
+    connect(watermarkPathEdit_, &QLineEdit::textChanged, this, &SettingsDialog::updateWatermarkPreview);
+    auto* browse = makeChipButton(tr("瀏覽"), watermarkCard_);
+    connect(browse, &QPushButton::clicked, this, &SettingsDialog::browseWatermarkImage);
+    auto* pathRow = new QWidget(watermarkCard_);
+    auto* pathLayout = new QHBoxLayout(pathRow);
+    pathLayout->setContentsMargins(0, 0, 0, 0);
+    pathLayout->setSpacing(6);
+    pathLayout->addWidget(watermarkPathEdit_, 1);
+    pathLayout->addWidget(browse);
+
+    watermarkOpacitySpin_ = new QSpinBox(watermarkCard_);
+    watermarkOpacitySpin_->setRange(1, 100);
+    watermarkOpacitySpin_->setSuffix(QStringLiteral(" %"));
+    watermarkOpacitySpin_->setMinimumWidth(72);
+
+    watermarkXSpin_ = new QSpinBox(watermarkCard_);
+    watermarkXSpin_->setRange(-9999, 9999);
+    watermarkXSpin_->setMinimumWidth(72);
+    watermarkYSpin_ = new QSpinBox(watermarkCard_);
+    watermarkYSpin_->setRange(-9999, 9999);
+    watermarkYSpin_->setMinimumWidth(72);
+    auto* coordRow = new QWidget(watermarkCard_);
+    auto* coordLayout = new QHBoxLayout(coordRow);
+    coordLayout->setContentsMargins(0, 0, 0, 0);
+    coordLayout->setSpacing(8);
+    auto* xLabel = new QLabel(tr("X"), coordRow);
+    auto* yLabel = new QLabel(tr("Y"), coordRow);
+    coordLayout->addWidget(xLabel);
+    coordLayout->addWidget(withStepButtons(watermarkXSpin_, watermarkCard_), 1);
+    coordLayout->addWidget(yLabel);
+    coordLayout->addWidget(withStepButtons(watermarkYSpin_, watermarkCard_), 1);
+
+    watermarkCaptureCheck_ = new QCheckBox(tr("套用到擷取畫面"), watermarkCard_);
+
+    watermarkPreview_ = new QLabel(watermarkCard_);
+    watermarkPreview_->setAlignment(Qt::AlignCenter);
+    watermarkPreview_->setMinimumHeight(96);
+    watermarkPreview_->setMaximumHeight(120);
+    watermarkPreview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    watermarkPreviewNote_ = new QLabel(watermarkCard_);
+    watermarkPreviewNote_->setObjectName(QStringLiteral("metaLabel"));
+    watermarkPreviewNote_->setWordWrap(true);
+
+    auto addRow = [](QGridLayout* grid, int row, QWidget* label, QWidget* field) {
+        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        grid->addWidget(label, row, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        grid->addWidget(field, row, 1);
+    };
+    auto* pathLabel = new QLabel(tr("圖片路徑"), watermarkCard_);
+    auto* opacityLabel = new QLabel(tr("不透明度"), watermarkCard_);
+    auto* coordLabel = new QLabel(tr("座標"), watermarkCard_);
+    auto* grid = new QGridLayout(watermarkCard_);
+    grid->setContentsMargins(12, 12, 12, 12);
+    grid->setHorizontalSpacing(16);
+    grid->setVerticalSpacing(12);
+    grid->setColumnStretch(1, 1);
+    addRow(grid, 0, pathLabel, pathRow);
+    addRow(grid, 1, opacityLabel, withStepButtons(watermarkOpacitySpin_, watermarkCard_));
+    addRow(grid, 2, coordLabel, coordRow);
+    grid->addWidget(watermarkCaptureCheck_, 3, 0, 1, 2);
+    grid->addWidget(watermarkPreview_, 4, 0, 1, 2);
+    grid->addWidget(watermarkPreviewNote_, 5, 0, 1, 2);
+
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(16, 10, 16, 12);
+    layout->setSpacing(8);
+    layout->addWidget(watermarkEnabledCheck_);
+    layout->addSpacing(6);
+    layout->addWidget(section);
+    layout->addWidget(watermarkCard_);
+    layout->addStretch();
+    return page;
+}
+
+QWidget* SettingsDialog::createPerformancePage()
+{
+    auto* page = new QWidget;
+    auto addRow = [](QGridLayout* grid, int row, QWidget* label, QWidget* field) {
+        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        grid->addWidget(label, row, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        grid->addWidget(field, row, 1);
+    };
+
+    auto* encodeLabel = new QLabel(tr("編碼"), page);
+    encodeLabel->setObjectName(QStringLiteral("sectionLabel"));
+    auto* encodeCard = new QWidget(page);
+    encodeCard->setObjectName(QStringLiteral("videoCard"));
+    multiCoreCombo_ = new QComboBox(encodeCard);
+    multiCoreCombo_->addItem(tr("已使用"), true);
+    multiCoreCombo_->addItem(tr("未使用"), false);
+    connect(multiCoreCombo_, &QComboBox::currentIndexChanged, this, &SettingsDialog::syncEncoderThreadsEnabled);
+    encoderThreadsCombo_ = new QComboBox(encodeCard);
+    encoderThreadsCombo_->addItem(tr("自動 (experimental)"), 0);
+    for (int i = 1; i <= 16; ++i) {
+        encoderThreadsCombo_->addItem(QString::number(i), i);
+    }
+    auto* encodeGrid = new QGridLayout(encodeCard);
+    encodeGrid->setContentsMargins(12, 12, 12, 12);
+    encodeGrid->setHorizontalSpacing(16);
+    encodeGrid->setVerticalSpacing(12);
+    encodeGrid->setColumnStretch(1, 1);
+    addRow(encodeGrid, 0, new QLabel(tr("使用多核心"), encodeCard), withDropButton(multiCoreCombo_, encodeCard));
+    addRow(encodeGrid, 1, new QLabel(tr("編碼器執行緒數量"), encodeCard), withDropButton(encoderThreadsCombo_, encodeCard));
+
+    auto* statusLabel = new QLabel(tr("狀態顯示"), page);
+    statusLabel->setObjectName(QStringLiteral("sectionLabel"));
+    auto* statusCard = new QWidget(page);
+    statusCard->setObjectName(QStringLiteral("videoCard"));
+    storageUpdateSpin_ = new QSpinBox(statusCard);
+    storageUpdateSpin_->setRange(1, 999);
+    storageUpdateSpin_->setSuffix(tr(" 秒"));
+    storageUpdateSpin_->setMinimumWidth(72);
+    auto* statusGrid = new QGridLayout(statusCard);
+    statusGrid->setContentsMargins(12, 12, 12, 12);
+    statusGrid->setHorizontalSpacing(16);
+    statusGrid->setVerticalSpacing(12);
+    statusGrid->setColumnStretch(1, 1);
+    addRow(statusGrid, 0, new QLabel(tr("容量更新間隔"), statusCard), withStepButtons(storageUpdateSpin_, statusCard));
+
+    auto* screenLabel = new QLabel(tr("螢幕錄製"), page);
+    screenLabel->setObjectName(QStringLiteral("sectionLabel"));
+    auto* screenCard = new QWidget(page);
+    screenCard->setObjectName(QStringLiteral("videoCard"));
+    captureModeCombo_ = new QComboBox(screenCard);
+    captureModeCombo_->addItem(tr("桌面重複 API（快）"), QStringLiteral("dxgi"));
+    captureModeCombo_->addItem(tr("GDI API"), QStringLiteral("gdi"));
+    auto* screenGrid = new QGridLayout(screenCard);
+    screenGrid->setContentsMargins(12, 12, 12, 12);
+    screenGrid->setHorizontalSpacing(16);
+    screenGrid->setVerticalSpacing(12);
+    screenGrid->setColumnStretch(1, 1);
+    addRow(screenGrid, 0, new QLabel(tr("捕獲模式"), screenCard), withDropButton(captureModeCombo_, screenCard));
+
+    auto* gameLabel = new QLabel(tr("遊戲錄製"), page);
+    gameLabel->setObjectName(QStringLiteral("sectionLabel"));
+    auto* gameCard = new QWidget(page);
+    gameCard->setObjectName(QStringLiteral("videoCard"));
+    pipelineLayersCombo_ = new QComboBox(gameCard);
+    pipelineLayersCombo_->addItem(tr("3 層管線（良好的效能）"), 3);
+    pipelineLayersCombo_->addItem(tr("2 層管線（正常）"), 2);
+    pipelineLayersCombo_->addItem(tr("無管線（慢）"), 0);
+    auto* gameGrid = new QGridLayout(gameCard);
+    gameGrid->setContentsMargins(12, 12, 12, 12);
+    gameGrid->setHorizontalSpacing(16);
+    gameGrid->setVerticalSpacing(12);
+    gameGrid->setColumnStretch(1, 1);
+    addRow(gameGrid, 0, new QLabel(tr("管線層"), gameCard), withDropButton(pipelineLayersCombo_, gameCard));
+
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(16, 10, 16, 12);
+    layout->setSpacing(8);
+    layout->addWidget(encodeLabel);
+    layout->addWidget(encodeCard);
+    layout->addSpacing(6);
+    layout->addWidget(statusLabel);
+    layout->addWidget(statusCard);
+    layout->addSpacing(6);
+    layout->addWidget(screenLabel);
+    layout->addWidget(screenCard);
+    layout->addSpacing(6);
+    layout->addWidget(gameLabel);
+    layout->addWidget(gameCard);
+    layout->addStretch();
+    return page;
+}
+
+QWidget* SettingsDialog::createHotkeysPage()
+{
+    auto* page = new QWidget;
+    auto* title = new QLabel(tr("快捷鍵設定"), page);
+    title->setObjectName(QStringLiteral("sectionLabel"));
+
+    auto* card = new QWidget(page);
+    card->setObjectName(QStringLiteral("videoCard"));
+    recordHotkeyCheck_ = new QCheckBox(card);
+    pauseHotkeyCheck_ = new QCheckBox(card);
+    captureHotkeyCheck_ = new QCheckBox(card);
+    selectHotkeyCheck_ = new QCheckBox(card);
+    recordHotkeyEdit_ = new HotkeyEdit(card);
+    pauseHotkeyEdit_ = new HotkeyEdit(card);
+    captureHotkeyEdit_ = new HotkeyEdit(card);
+    selectHotkeyEdit_ = new HotkeyEdit(card);
+    const QString hint = tr("按下鍵盤以設定快捷鍵");
+    recordHotkeyEdit_->setPlaceholderText(hint);
+    pauseHotkeyEdit_->setPlaceholderText(hint);
+    captureHotkeyEdit_->setPlaceholderText(hint);
+    selectHotkeyEdit_->setPlaceholderText(hint);
+
+    auto* grid = new QGridLayout(card);
+    grid->setContentsMargins(12, 12, 12, 12);
+    grid->setHorizontalSpacing(10);
+    grid->setVerticalSpacing(10);
+    grid->setColumnStretch(1, 1);
+
+    const auto addRow = [grid](int row, QCheckBox* check, const QString& label, HotkeyEdit* edit) {
+        auto* text = new QLabel(label);
+        grid->addWidget(check, row, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        grid->addWidget(text, row, 1, Qt::AlignLeft | Qt::AlignVCenter);
+        grid->addWidget(edit, row, 2, Qt::AlignRight | Qt::AlignVCenter);
+        QObject::connect(check, &QCheckBox::toggled, edit, &QWidget::setEnabled);
+    };
+    addRow(0, recordHotkeyCheck_, tr("錄製開關"), recordHotkeyEdit_);
+    addRow(1, pauseHotkeyCheck_, tr("暫停錄製"), pauseHotkeyEdit_);
+    addRow(2, captureHotkeyCheck_, tr("擷取畫面"), captureHotkeyEdit_);
+    addRow(3, selectHotkeyCheck_, tr("選擇目標"), selectHotkeyEdit_);
+
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(16, 10, 16, 12);
+    layout->setSpacing(8);
+    layout->addWidget(title);
+    layout->addWidget(card);
+    layout->addStretch();
+    return page;
+}
+
+QWidget* SettingsDialog::createGifPage()
+{
+    auto* page = new QWidget;
+    gifCursorCheck_ = new QCheckBox(tr("包含游標"), page);
+
+    auto* gifLabel = new QLabel(tr("GIF動畫設定"), page);
+    gifLabel->setObjectName(QStringLiteral("sectionLabel"));
+
+    auto* gifCard = new QWidget(page);
+    gifCard->setObjectName(QStringLiteral("videoCard"));
+    gifFrameRateSpin_ = new QSpinBox(gifCard);
+    gifFrameRateSpin_->setRange(Config::kMinFrameRate, Config::kMaxFrameRate);
+    gifFrameRateSpin_->setMinimumWidth(72);
+
+    auto addRow = [](QGridLayout* grid, int row, QWidget* label, QWidget* field) {
+        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        grid->addWidget(label, row, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        grid->addWidget(field, row, 1);
+    };
+    auto* fpsLabel = new QLabel(tr("每秒幀數") + QStringLiteral(" FPS"), gifCard);
+    auto* gifGrid = new QGridLayout(gifCard);
+    gifGrid->setContentsMargins(12, 12, 12, 12);
+    gifGrid->setHorizontalSpacing(16);
+    gifGrid->setVerticalSpacing(12);
+    gifGrid->setColumnStretch(1, 1);
+    addRow(gifGrid, 0, fpsLabel, withStepButtons(gifFrameRateSpin_, gifCard));
+
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(16, 10, 16, 12);
+    layout->setSpacing(8);
+    layout->addWidget(gifCursorCheck_);
+    layout->addSpacing(6);
+    layout->addWidget(gifLabel);
+    layout->addWidget(gifCard);
     layout->addStretch();
     return page;
 }
@@ -770,7 +1219,7 @@ QWidget* SettingsDialog::createRecordPage()
     videoCard->setObjectName(QStringLiteral("videoCard"));
 
     frameRateSpin_ = new QSpinBox(videoCard);
-    frameRateSpin_->setRange(1, 120);
+    frameRateSpin_->setRange(Config::kMinFrameRate, Config::kMaxFrameRate);
     frameRateSpin_->setMinimumWidth(72);
 
     qualityCombo_ = new QComboBox(videoCard);
@@ -856,9 +1305,7 @@ QWidget* SettingsDialog::createRecordPage()
 
 QString SettingsDialog::currentExtension() const
 {
-    return config_.data().container.compare(QLatin1String("wmv"), Qt::CaseInsensitive) == 0
-        ? QStringLiteral(".wmv")
-        : QStringLiteral(".mp4");
+    return Config::containerExtension(config_.data().container);
 }
 
 void SettingsDialog::loadRecordingFrom(const ConfigData& cfg)
@@ -868,7 +1315,7 @@ void SettingsDialog::loadRecordingFrom(const ConfigData& cfg)
     trayIconCheck_->setChecked(cfg.useTrayIcon);
     hideMinimizedCheck_->setChecked(cfg.hideWhenMinimized);
     hideStartupCheck_->setChecked(cfg.hideOnStartup);
-    frameRateSpin_->setValue(cfg.frameRate);
+    frameRateSpin_->setValue(Config::normalizedFrameRate(cfg.frameRate));
     const int qualityIndex = qualityCombo_->findData(cfg.videoQuality);
     qualityCombo_->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
     customBitrateKbps_ = cfg.customBitrateKbps;
@@ -902,6 +1349,93 @@ void SettingsDialog::loadCaptureFrom(const ConfigData& cfg)
     const int formatIndex = captureFormatCombo_->findData(
         Config::normalizedCaptureImageFormat(cfg.captureImageFormat));
     captureFormatCombo_->setCurrentIndex(formatIndex >= 0 ? formatIndex : 0);
+}
+
+void SettingsDialog::loadGifFrom(const ConfigData& cfg)
+{
+    gifCursorCheck_->setChecked(cfg.gifIncludeCursor);
+    gifFrameRateSpin_->setValue(Config::normalizedGifFrameRate(cfg.gifFrameRate));
+}
+
+void SettingsDialog::syncTimeLimitEnabled()
+{
+    const bool on = timeLimitEnabledCheck_->isChecked();
+    timeLimitDurationCard_->setEnabled(on);
+    timeLimitOptionsCard_->setEnabled(on);
+}
+
+void SettingsDialog::loadTimeLimitFrom(const ConfigData& cfg)
+{
+    timeLimitEnabledCheck_->setChecked(cfg.timeLimitEnabled);
+    timeLimitMinutesSpin_->setValue(Config::normalizedTimeLimitMinutes(cfg.timeLimitMinutes));
+    timeLimitSecondsSpin_->setValue(Config::normalizedTimeLimitSeconds(cfg.timeLimitSeconds));
+    if (QAbstractButton* button = timeLimitActionGroup_->button(timeLimitActionId(cfg.timeLimitAction))) {
+        button->setChecked(true);
+    } else if (QAbstractButton* fallback = timeLimitActionGroup_->button(TimeLimitNone)) {
+        fallback->setChecked(true);
+    }
+    syncTimeLimitEnabled();
+}
+
+void SettingsDialog::loadWatermarkFrom(const ConfigData& cfg)
+{
+    watermarkEnabledCheck_->setChecked(cfg.watermarkEnabled);
+    watermarkPathEdit_->setText(cfg.watermarkImagePath);
+    watermarkOpacitySpin_->setValue(Config::normalizedWatermarkOpacity(cfg.watermarkOpacity));
+    watermarkXSpin_->setValue(Config::normalizedWatermarkOffset(cfg.watermarkX));
+    watermarkYSpin_->setValue(Config::normalizedWatermarkOffset(cfg.watermarkY));
+    watermarkCaptureCheck_->setChecked(cfg.watermarkApplyToCapture);
+    syncWatermarkEnabled();
+    updateWatermarkPreview();
+}
+
+void SettingsDialog::syncWatermarkEnabled()
+{
+    const bool on = watermarkEnabledCheck_->isChecked();
+    watermarkCard_->setEnabled(on);
+}
+
+void SettingsDialog::loadPerformanceFrom(const ConfigData& cfg)
+{
+    const int coreIndex = multiCoreCombo_->findData(cfg.useMultiCore);
+    multiCoreCombo_->setCurrentIndex(coreIndex >= 0 ? coreIndex : 0);
+    const int threadIndex = encoderThreadsCombo_->findData(
+        Config::normalizedEncoderThreads(cfg.encoderThreads));
+    encoderThreadsCombo_->setCurrentIndex(threadIndex >= 0 ? threadIndex : 0);
+    const int modeIndex = captureModeCombo_->findData(Config::normalizedCaptureMode(cfg.captureMode));
+    captureModeCombo_->setCurrentIndex(modeIndex >= 0 ? modeIndex : 0);
+    const int layerIndex = pipelineLayersCombo_->findData(
+        Config::normalizedPipelineLayers(cfg.pipelineLayers));
+    pipelineLayersCombo_->setCurrentIndex(layerIndex >= 0 ? layerIndex : 0);
+    storageUpdateSpin_->setValue(Config::normalizedStorageUpdateSeconds(cfg.storageUpdateSeconds));
+    syncEncoderThreadsEnabled();
+}
+
+void SettingsDialog::syncEncoderThreadsEnabled()
+{
+    const bool on = multiCoreCombo_->currentData().toBool();
+    encoderThreadsCombo_->setEnabled(on);
+}
+
+void SettingsDialog::loadHotkeysFrom(const ConfigData& cfg)
+{
+    recordHotkeyCheck_->setChecked(cfg.toggleRecordEnabled);
+    pauseHotkeyCheck_->setChecked(cfg.togglePauseEnabled);
+    captureHotkeyCheck_->setChecked(cfg.captureStillEnabled);
+    selectHotkeyCheck_->setChecked(cfg.selectTargetEnabled);
+    recordHotkeyEdit_->setSequence(cfg.toggleRecord);
+    pauseHotkeyEdit_->setSequence(cfg.togglePause);
+    captureHotkeyEdit_->setSequence(cfg.captureStill);
+    selectHotkeyEdit_->setSequence(cfg.selectTarget);
+    syncHotkeyEdits();
+}
+
+void SettingsDialog::syncHotkeyEdits()
+{
+    recordHotkeyEdit_->setEnabled(recordHotkeyCheck_->isChecked());
+    pauseHotkeyEdit_->setEnabled(pauseHotkeyCheck_->isChecked());
+    captureHotkeyEdit_->setEnabled(captureHotkeyCheck_->isChecked());
+    selectHotkeyEdit_->setEnabled(selectHotkeyCheck_->isChecked());
 }
 
 void SettingsDialog::loadAudioFrom(const ConfigData& cfg)
@@ -975,6 +1509,39 @@ void SettingsDialog::browseDirectory()
     }
 }
 
+void SettingsDialog::browseWatermarkImage()
+{
+    const QString start = watermarkPathEdit_->text().trimmed();
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        tr("選擇浮水印圖片"),
+        start,
+        tr("圖片 (*.png *.jpg *.jpeg *.bmp);;所有檔案 (*.*)"));
+    if (!path.isEmpty()) {
+        watermarkPathEdit_->setText(QDir::toNativeSeparators(path));
+    }
+}
+
+void SettingsDialog::updateWatermarkPreview()
+{
+    const QString path = watermarkPathEdit_->text().trimmed();
+    if (path.isEmpty()) {
+        watermarkPreview_->clear();
+        watermarkPreviewNote_->setText(tr("尚未選擇圖片。"));
+        return;
+    }
+    QImage image;
+    if (!image.load(path) || image.isNull()) {
+        watermarkPreview_->clear();
+        watermarkPreviewNote_->setText(tr("無法載入圖片。"));
+        return;
+    }
+    watermarkPreview_->setPixmap(
+        QPixmap::fromImage(image).scaled(180, 96, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    watermarkPreviewNote_->setText(
+        tr("%1 × %2").arg(image.width()).arg(image.height()));
+}
+
 void SettingsDialog::showFilenameHelp()
 {
     QMessageBox::information(
@@ -1013,13 +1580,71 @@ void SettingsDialog::resetToDefaults()
     loadRecordingFrom(defaults);
     loadAudioFrom(defaults);
     loadCaptureFrom(defaults);
+    loadGifFrom(defaults);
+    loadTimeLimitFrom(defaults);
+    loadWatermarkFrom(defaults);
+    loadPerformanceFrom(defaults);
+    loadHotkeysFrom(defaults);
     const int langIndex = languageCombo_->findData(defaults.language);
     languageCombo_->setCurrentIndex(langIndex >= 0 ? langIndex : 0);
     updatePreview();
 }
 
-void SettingsDialog::applyToConfig()
+bool SettingsDialog::validateHotkeys()
 {
+    struct Row {
+        QCheckBox* check;
+        HotkeyEdit* edit;
+    };
+    const Row rows[] = {
+        {recordHotkeyCheck_, recordHotkeyEdit_},
+        {pauseHotkeyCheck_, pauseHotkeyEdit_},
+        {captureHotkeyCheck_, captureHotkeyEdit_},
+        {selectHotkeyCheck_, selectHotkeyEdit_},
+    };
+    QStringList used;
+    for (const Row& row : rows) {
+        if (!row.check->isChecked()) {
+            continue;
+        }
+        const QString normalized = normalizeHotkey(row.edit->sequence());
+        if (normalized.isEmpty()) {
+            QMessageBox::warning(this, tr("設定"), tr("請為已啟用的快捷鍵指定按鍵。"));
+            pages_->setCurrentIndex(static_cast<int>(Page::Hotkeys));
+            return false;
+        }
+        if (used.contains(normalized, Qt::CaseInsensitive)) {
+            QMessageBox::warning(this, tr("設定"), tr("已啟用的快捷鍵不可重複。"));
+            pages_->setCurrentIndex(static_cast<int>(Page::Hotkeys));
+            return false;
+        }
+        used.append(normalized);
+    }
+    return true;
+}
+
+bool SettingsDialog::validateWatermark()
+{
+    if (!watermarkEnabledCheck_->isChecked()) {
+        return true;
+    }
+    const QString path = watermarkPathEdit_->text().trimmed();
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
+        QMessageBox::warning(this, tr("設定"), tr("請選擇有效的浮水印圖片。"));
+        pages_->setCurrentIndex(static_cast<int>(Page::Watermark));
+        return false;
+    }
+    return true;
+}
+
+bool SettingsDialog::applyToConfig()
+{
+    if (!validateHotkeys()) {
+        return false;
+    }
+    if (!validateWatermark()) {
+        return false;
+    }
     config_.data().directory = directoryEdit_->text().trimmed();
     const QString nameTemplate = templateEdit_->text().trimmed();
     if (!nameTemplate.isEmpty()) {
@@ -1036,7 +1661,7 @@ void SettingsDialog::applyToConfig()
     config_.data().useTrayIcon = trayIconCheck_->isChecked();
     config_.data().hideWhenMinimized = hideMinimizedCheck_->isChecked();
     config_.data().hideOnStartup = hideStartupCheck_->isChecked();
-    config_.data().frameRate = frameRateSpin_->value();
+    config_.data().frameRate = Config::normalizedFrameRate(frameRateSpin_->value());
     config_.data().videoQuality = qualityCombo_->currentData().toString();
     config_.data().customBitrateKbps = customBitrateKbps_;
     config_.data().keyframeInterval = keyframeSlider_->value();
@@ -1051,6 +1676,41 @@ void SettingsDialog::applyToConfig()
     config_.data().captureIncludeCursor = captureCursorCheck_->isChecked();
     config_.data().captureImageFormat = Config::normalizedCaptureImageFormat(
         captureFormatCombo_->currentData().toString());
+    config_.data().gifIncludeCursor = gifCursorCheck_->isChecked();
+    config_.data().gifFrameRate = Config::normalizedGifFrameRate(gifFrameRateSpin_->value());
+    config_.data().timeLimitEnabled = timeLimitEnabledCheck_->isChecked();
+    config_.data().timeLimitMinutes = Config::normalizedTimeLimitMinutes(timeLimitMinutesSpin_->value());
+    config_.data().timeLimitSeconds = Config::normalizedTimeLimitSeconds(timeLimitSecondsSpin_->value());
+    if (config_.data().timeLimitEnabled && config_.data().timeLimitMinutes == 0
+        && config_.data().timeLimitSeconds == 0) {
+        config_.data().timeLimitSeconds = 1;
+        timeLimitSecondsSpin_->setValue(1);
+    }
+    config_.data().timeLimitAction = timeLimitActionFromId(timeLimitActionGroup_->checkedId());
+    config_.data().watermarkEnabled = watermarkEnabledCheck_->isChecked();
+    config_.data().watermarkImagePath = watermarkPathEdit_->text().trimmed();
+    config_.data().watermarkOpacity = Config::normalizedWatermarkOpacity(watermarkOpacitySpin_->value());
+    config_.data().watermarkX = Config::normalizedWatermarkOffset(watermarkXSpin_->value());
+    config_.data().watermarkY = Config::normalizedWatermarkOffset(watermarkYSpin_->value());
+    config_.data().watermarkApplyToCapture = watermarkCaptureCheck_->isChecked();
+    config_.data().useMultiCore = multiCoreCombo_->currentData().toBool();
+    config_.data().encoderThreads = Config::normalizedEncoderThreads(
+        encoderThreadsCombo_->currentData().toInt());
+    config_.data().captureMode = Config::normalizedCaptureMode(
+        captureModeCombo_->currentData().toString());
+    config_.data().pipelineLayers = Config::normalizedPipelineLayers(
+        pipelineLayersCombo_->currentData().toInt());
+    config_.data().storageUpdateSeconds = Config::normalizedStorageUpdateSeconds(
+        storageUpdateSpin_->value());
+    config_.data().toggleRecordEnabled = recordHotkeyCheck_->isChecked();
+    config_.data().togglePauseEnabled = pauseHotkeyCheck_->isChecked();
+    config_.data().captureStillEnabled = captureHotkeyCheck_->isChecked();
+    config_.data().selectTargetEnabled = selectHotkeyCheck_->isChecked();
+    config_.data().toggleRecord = recordHotkeyEdit_->sequence();
+    config_.data().togglePause = pauseHotkeyEdit_->sequence();
+    config_.data().captureStill = captureHotkeyEdit_->sequence();
+    config_.data().selectTarget = selectHotkeyEdit_->sequence();
+    return true;
 }
 
 } // namespace ors

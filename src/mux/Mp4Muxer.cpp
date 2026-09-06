@@ -213,6 +213,18 @@ bool Mp4Muxer::open(const MuxerOpenParams& params)
         }
     }
 
+    if (params.encoderThreads > 0) {
+        ComPtr<ICodecAPI> codec;
+        if (SUCCEEDED(impl_->writer->GetServiceForStream(
+                impl_->videoStream, GUID_NULL, IID_PPV_ARGS(&codec)))
+            && codec) {
+            VARIANT value{};
+            value.vt = VT_UI4;
+            value.ulVal = static_cast<ULONG>(params.encoderThreads);
+            codec->SetValue(&CODECAPI_AVEncNumWorkerThreads, &value);
+        }
+    }
+
     if (impl_->hasAudio) {
         ComPtr<IMFMediaType> audioOut;
         hr = MFCreateMediaType(&audioOut);

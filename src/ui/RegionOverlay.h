@@ -64,6 +64,7 @@ private:
 
     void applyNativeWindowHints();
     void applyWin32Bounds();
+    void applyWindowMask();
     void updateCursor(HitZone zone);
     void applyDrag(const QPoint& globalPos);
     void emitNativeChanged();

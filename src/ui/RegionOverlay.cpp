@@ -6,6 +6,7 @@
 #include <QMouseEvent>
 #include <QMoveEvent>
 #include <QPainter>
+#include <QRegion>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QShowEvent>
@@ -247,6 +248,7 @@ void RegionOverlay::setInteractive(bool enabled)
 void RegionOverlay::setRecording(bool recording)
 {
     recording_ = recording;
+    applyWindowMask();
     update();
 }
 
@@ -262,6 +264,8 @@ void RegionOverlay::resizeEvent(QResizeEvent* event)
     QWidget::resizeEvent(event);
     if (!applyingNative_ && !dragging_ && nativeRect_.isValid()) {
         applyWin32Bounds();
+    } else {
+        applyWindowMask();
     }
 }
 
@@ -289,19 +293,32 @@ void RegionOverlay::applyNativeWindowHints()
 void RegionOverlay::applyWin32Bounds()
 {
 #ifdef Q_OS_WIN
-    if (!nativeRect_.isValid() || !internalWinId()) {
-        return;
+    if (nativeRect_.isValid() && internalWinId()) {
+        HWND hwnd = reinterpret_cast<HWND>(internalWinId());
+        SetWindowPos(
+            hwnd,
+            nullptr,
+            nativeRect_.x(),
+            nativeRect_.y(),
+            nativeRect_.width(),
+            nativeRect_.height(),
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
-    HWND hwnd = reinterpret_cast<HWND>(internalWinId());
-    SetWindowPos(
-        hwnd,
-        nullptr,
-        nativeRect_.x(),
-        nativeRect_.y(),
-        nativeRect_.width(),
-        nativeRect_.height(),
-        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 #endif
+    applyWindowMask();
+}
+
+void RegionOverlay::applyWindowMask()
+{
+    QRegion mask(rect());
+    const QRect hole = rect().adjusted(kHit, kHit, -kHit, -kHit);
+    if (hole.width() > 0 && hole.height() > 0) {
+        mask -= QRegion(hole);
+    }
+    if (!recording_) {
+        mask += QRegion(chipRect());
+    }
+    setMask(mask);
 }
 
 void RegionOverlay::paintEvent(QPaintEvent*)
@@ -337,6 +354,10 @@ void RegionOverlay::paintEvent(QPaintEvent*)
     painter.setBrush(accent);
     for (const QPoint& p : handles) {
         painter.drawRect(QRect(p.x() - kHandle / 2, p.y() - kHandle / 2, kHandle, kHandle));
+    }
+
+    if (recording_) {
+        return;
     }
 
     const QRect native = captureRectNative();

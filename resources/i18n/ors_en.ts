@@ -11,8 +11,10 @@
     <message><source>螢幕錄製</source><translation>Screen recording</translation></message>
     <message><source>遊戲錄製</source><translation>Game recording</translation></message>
     <message><source>音訊錄製</source><translation>Audio recording</translation></message>
-    <message><source>錄製</source><translation>Record</translation></message>
-    <message><source>停止</source><translation>Stop</translation></message>
+    <message><source>暫停</source><translation>Pause</translation></message>
+    <message><source>繼續</source><translation>Resume</translation></message>
+    <message><source>已錄製容量 / 剩餘磁碟空間</source><translation>Recorded size / free disk space</translation></message>
+    <message><source>%1 / %2</source><translation>%1 / %2</translation></message>
     <message><source>範圍</source><translation>Region</translation></message>
     <message><source>全螢幕</source><translation>Fullscreen</translation></message>
     <message><source>主要顯示器</source><translation>Primary display</translation></message>
@@ -29,6 +31,7 @@
     <message><source>自訂大小…</source><translation>Custom size...</translation></message>
     <message><source>輸出格式</source><translation>Output format</translation></message>
     <message><source>H.264 + AAC (.MP4)</source><translation>H.264 + AAC (.MP4)</translation></message>
+    <message><source>GIF (.GIF)</source><translation>GIF (.GIF)</translation></message>
     <message><source>WMV</source><translation>WMV</translation></message>
     <message><source>其他容器（後續 Phase）</source><translation>Other containers (later)</translation></message>
     <message><source>麥克風</source><translation>Microphone</translation></message>
@@ -52,7 +55,7 @@
     <message><source>遊戲視窗</source><translation>Game window</translation></message>
     <message><source>僅音訊</source><translation>Audio only</translation></message>
     <message><source>螢幕畫面</source><translation>Screen</translation></message>
-    <message><source>目前僅支援 MP4 輸出。</source><translation>Only MP4 output is supported right now.</translation></message>
+    <message><source>目前僅支援 MP4 與 GIF 輸出。</source><translation>Only MP4 and GIF output are supported right now.</translation></message>
     <message><source>遊戲擷取將在後續 Phase 實作。</source><translation>Game capture will be added in a later phase.</translation></message>
     <message><source>僅音訊錄製將在後續 Phase 實作。</source><translation>Audio-only recording will be added in a later phase.</translation></message>
     <message><source>已儲存 %1</source><translation>Saved %1</translation></message>
@@ -61,6 +64,18 @@
     <message><source>高度</source><translation>Height</translation></message>
     <message><source>顯示</source><translation>Show</translation></message>
     <message><source>結束</source><translation>Quit</translation></message>
+    <message><source>無法註冊快捷鍵：%1
+可在設定中改成其他按鍵。</source><translation>Could not register hotkey: %1
+Choose a different key in Settings.</translation></message>
+    <message><source>%1 (%2)</source><translation>%1 (%2)</translation></message>
+    <message><source>錄製開關</source><translation>Record toggle</translation></message>
+    <message><source>暫停錄製</source><translation>Pause recording</translation></message>
+    <message><source>擷取畫面</source><translation>Screen capture</translation></message>
+    <message><source>選擇目標</source><translation>Select target</translation></message>
+    <message><source>無法關機。</source><translation>Could not shut down the computer.</translation></message>
+    <message><source>無法讓電腦休眠。</source><translation>Could not put the computer to sleep.</translation></message>
+    <message><source>目前僅支援 Windows 關機。</source><translation>Shutdown is currently Windows-only.</translation></message>
+    <message><source>目前僅支援 Windows 休眠。</source><translation>Sleep is currently Windows-only.</translation></message>
 </context>
 <context>
     <name>ors::RegionSelector</name>
@@ -79,11 +94,59 @@
     <message><source>擷取</source><translation>Capture</translation></message>
     <message><source>GIF動畫</source><translation>GIF</translation></message>
     <message><source>快捷鍵</source><translation>Hotkeys</translation></message>
+    <message><source>快捷鍵設定</source><translation>Shortcut keys</translation></message>
+    <message><source>錄製開關</source><translation>Record toggle</translation></message>
+    <message><source>暫停錄製</source><translation>Pause recording</translation></message>
+    <message><source>擷取畫面</source><translation>Screen capture</translation></message>
+    <message><source>選擇目標</source><translation>Select target</translation></message>
+    <message><source>按下鍵盤以設定快捷鍵</source><translation>Press a key</translation></message>
+    <message><source>請為已啟用的快捷鍵指定按鍵。</source><translation>Assign a key to each enabled shortcut.</translation></message>
+    <message><source>已啟用的快捷鍵不可重複。</source><translation>Enabled shortcuts cannot use the same key.</translation></message>
     <message><source>時間限制</source><translation>Time limit</translation></message>
+    <message><source>啟用</source><translation>Enable</translation></message>
+    <message><source>錄製時間限制</source><translation>Recording time limit</translation></message>
+    <message><source>分</source><translation>min</translation></message>
+    <message><source>秒</source><translation>sec</translation></message>
+    <message><source>選項</source><translation>Options</translation></message>
+    <message><source>什麼都不做</source><translation>Do nothing</translation></message>
+    <message><source>開始新的錄製</source><translation>Start a new recording</translation></message>
+    <message><source>關閉程式</source><translation>Close the program</translation></message>
+    <message><source>關機</source><translation>Shut down</translation></message>
+    <message><source>讓電腦休眠</source><translation>Put the computer to sleep</translation></message>
     <message><source>浮水印</source><translation>Watermark</translation></message>
     <message><source>效能</source><translation>Performance</translation></message>
     <message><source>語言</source><translation>Language</translation></message>
-    <message><source>此頁面將於後續實作。</source><translation>This page will be added later.</translation></message>
+    <message><source>PNG、JPG 或 BMP</source><translation>PNG, JPG, or BMP</translation></message>
+    <message><source>圖片路徑</source><translation>Image path</translation></message>
+    <message><source>不透明度</source><translation>Opacity</translation></message>
+    <message><source>座標</source><translation>Position</translation></message>
+    <message><source>X</source><translation>X</translation></message>
+    <message><source>Y</source><translation>Y</translation></message>
+    <message><source>套用到擷取畫面</source><translation>Apply to screenshots</translation></message>
+    <message><source>選擇浮水印圖片</source><translation>Choose watermark image</translation></message>
+    <message><source>圖片 (*.png *.jpg *.jpeg *.bmp);;所有檔案 (*.*)</source><translation>Images (*.png *.jpg *.jpeg *.bmp);;All files (*.*)</translation></message>
+    <message><source>尚未選擇圖片。</source><translation>No image selected.</translation></message>
+    <message><source>無法載入圖片。</source><translation>Could not load the image.</translation></message>
+    <message><source>%1 × %2</source><translation>%1 × %2</translation></message>
+    <message><source>請選擇有效的浮水印圖片。</source><translation>Choose a valid watermark image.</translation></message>
+    <message><source>編碼</source><translation>Encoding</translation></message>
+    <message><source>已使用</source><translation>Enabled</translation></message>
+    <message><source>未使用</source><translation>Disabled</translation></message>
+    <message><source>自動 (experimental)</source><translation>Auto (experimental)</translation></message>
+    <message><source>使用多核心</source><translation>Use multi-core</translation></message>
+    <message><source>狀態顯示</source><translation>Status display</translation></message>
+    <message><source>容量更新間隔</source><translation>Storage refresh interval</translation></message>
+    <message><source> 秒</source><translation> sec</translation></message>
+    <message><source>編碼器執行緒數量</source><translation>Encoder thread count</translation></message>
+    <message><source>螢幕錄製</source><translation>Screen recording</translation></message>
+    <message><source>桌面重複 API（快）</source><translation>Desktop Duplication API (fast)</translation></message>
+    <message><source>GDI API</source><translation>GDI API</translation></message>
+    <message><source>捕獲模式</source><translation>Capture mode</translation></message>
+    <message><source>遊戲錄製</source><translation>Game recording</translation></message>
+    <message><source>3 層管線（良好的效能）</source><translation>3 pipeline layers (good performance)</translation></message>
+    <message><source>2 層管線（正常）</source><translation>2 pipeline layers (normal)</translation></message>
+    <message><source>無管線（慢）</source><translation>No pipeline (slow)</translation></message>
+    <message><source>管線層</source><translation>Pipeline layers</translation></message>
     <message><source>空白 = 系統「影片」資料夾</source><translation>Empty = system Videos folder</translation></message>
     <message><source>瀏覽</source><translation>Browse</translation></message>
     <message><source>範本</source><translation>Presets</translation></message>
@@ -115,6 +178,7 @@
     <message><source>取消</source><translation>Cancel</translation></message>
     <message><source>確定</source><translation>OK</translation></message>
     <message><source>包含游標</source><translation>Include cursor</translation></message>
+    <message><source>GIF動畫設定</source><translation>GIF animation</translation></message>
     <message><source>圖檔格式</source><translation>Image format</translation></message>
     <message><source>總是最上層</source><translation>Always on top</translation></message>
     <message><source>使用工作列圖示</source><translation>Use tray icon</translation></message>
@@ -175,7 +239,7 @@
     <name>ors::RecordingSession</name>
     <message><source>無法開始錄製</source><translation>Could not start recording</translation></message>
     <message><source>目前僅支援 Windows 錄製</source><translation>Recording is currently Windows-only</translation></message>
-    <message><source>目前僅支援 MP4 輸出</source><translation>Only MP4 output is supported right now</translation></message>
+    <message><source>目前僅支援 MP4 與 GIF 輸出</source><translation>Only MP4 and GIF output are supported right now</translation></message>
     <message><source>擷取區域太小</source><translation>The capture region is too small</translation></message>
 </context>
 </TS>

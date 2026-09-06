@@ -2,6 +2,7 @@
 
 #include "core/Config.h"
 #include "core/RecordingSession.h"
+#include "ui/HotkeyRegistrar.h"
 
 #include <QElapsedTimer>
 #include <QMainWindow>
@@ -63,6 +64,7 @@ private:
     QRect presetRegionRect(const QString& preset) const;
 
     void onRecord();
+    void onPauseToggle();
     void onCapture();
     void onOpenFolder();
     void onSettings();
@@ -73,39 +75,56 @@ private:
     void rebuildSoundMenu();
     void onTabChanged(int index);
     void onSessionError(const QString& message);
+    void registerHotkeys();
+    void onHotkey(HotkeyAction action);
+    QString hotkeyActionName(HotkeyAction action) const;
 
     QString tabKey(int index) const;
     int tabIndex(const QString& key) const;
     QString stateText() const;
     QString modeHint() const;
+    QString idleMetaText() const;
+    QString recordingStatsText() const;
+    void updateRecordingStats();
     RecordingRequest makeRecordingRequest() const;
     void onSessionFinished(const QString& path);
     void onTimerTick();
+    void applyTimeLimitAction();
+    void requestSystemShutdown();
+    void requestSystemSleep();
     qint64 currentElapsedMs() const;
     static QString formatElapsed(qint64 milliseconds);
 
     Config config_;
     RecordingSession session_;
+    HotkeyRegistrar hotkeys_;
     QElapsedTimer recClock_;
+    QElapsedTimer storageClock_;
     qint64 recordedMs_{0};
     QTimer* uiTimer_{};
+    bool timeLimitHit_{false};
 
     QButtonGroup* tabGroup_{};
     QPushButton* screenTab_{};
     QPushButton* gameTab_{};
     QPushButton* audioTab_{};
 
+    QWidget* modeRow_{};
+    QWidget* statusRow_{};
     QToolButton* recordButton_{};
+    QToolButton* pauseButton_{};
     QToolButton* captureButton_{};
     QToolButton* regionButton_{};
     QToolButton* openButton_{};
     QToolButton* codecButton_{};
     QToolButton* soundButton_{};
     QToolButton* settingsButton_{};
+    QWidget* actionSpacer_{};
 
     QLabel* statusLabel_{};
     QLabel* metaLabel_{};
     QLabel* timerLabel_{};
+    QLabel* recordingStatsLabel_{};
 
     QAction* systemAudioAction_{};
     QMenu* regionMenu_{};

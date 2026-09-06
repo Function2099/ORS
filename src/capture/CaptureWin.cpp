@@ -26,6 +26,24 @@ QString hrHex(HRESULT hr)
     return QStringLiteral("0x%1").arg(static_cast<quint32>(hr), 8, 16, QLatin1Char('0'));
 }
 
+bool isBlankBgra(const VideoFrame& frame)
+{
+    if (frame.format != PixelFormat::BGRA8 || frame.width < 1 || frame.height < 1 || frame.bytes.empty()) {
+        return true;
+    }
+    const int stride = frame.stride > 0 ? frame.stride : frame.width * 4;
+    for (int y = 0; y < frame.height; ++y) {
+        const auto* row = frame.bytes.data() + static_cast<std::ptrdiff_t>(y) * stride;
+        for (int x = 0; x < frame.width; ++x) {
+            const auto* px = row + static_cast<std::ptrdiff_t>(x) * 4;
+            if ((px[0] | px[1] | px[2]) != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 int overlapArea(const RECT& a, const RECT& b)
 {
     const int left = std::max(static_cast<int>(a.left), static_cast<int>(b.left));
@@ -47,6 +65,20 @@ RECT toRect(const CaptureSettings& settings)
     return rect;
 }
 
+void forceOpaqueAlpha(VideoFrame& frame)
+{
+    if (frame.format != PixelFormat::BGRA8 || frame.width < 1 || frame.height < 1 || frame.bytes.empty()) {
+        return;
+    }
+    const int stride = frame.stride > 0 ? frame.stride : frame.width * 4;
+    for (int y = 0; y < frame.height; ++y) {
+        auto* row = frame.bytes.data() + static_cast<std::ptrdiff_t>(y) * stride;
+        for (int x = 0; x < frame.width; ++x) {
+            row[static_cast<std::ptrdiff_t>(x) * 4 + 3] = 255;
+        }
+    }
+}
+
 void blitCursor(VideoFrame& frame, int originX, int originY)
 {
     if (frame.format != PixelFormat::BGRA8 || frame.width < 2 || frame.height < 2 || frame.bytes.empty()) {
@@ -63,6 +95,17 @@ void blitCursor(VideoFrame& frame, int originX, int originY)
     if (!GetIconInfo(info.hCursor, &iconInfo)) {
         return;
     }
+
+    int cursorW = 32;
+    int cursorH = 32;
+    BITMAP bitmap{};
+    if (iconInfo.hbmColor && GetObject(iconInfo.hbmColor, sizeof(bitmap), &bitmap)) {
+        cursorW = std::max(1, static_cast<int>(bitmap.bmWidth));
+        cursorH = std::max(1, static_cast<int>(bitmap.bmHeight));
+    } else if (iconInfo.hbmMask && GetObject(iconInfo.hbmMask, sizeof(bitmap), &bitmap)) {
+        cursorW = std::max(1, static_cast<int>(bitmap.bmWidth));
+        cursorH = std::max(1, static_cast<int>(bitmap.bmHeight) / 2);
+    }
     if (iconInfo.hbmMask) {
         DeleteObject(iconInfo.hbmMask);
     }
@@ -70,16 +113,16 @@ void blitCursor(VideoFrame& frame, int originX, int originY)
         DeleteObject(iconInfo.hbmColor);
     }
 
-    const int x = info.ptScreenPos.x - static_cast<int>(iconInfo.xHotspot) - originX;
-    const int y = info.ptScreenPos.y - static_cast<int>(iconInfo.yHotspot) - originY;
-    if (x + 64 < 0 || y + 64 < 0 || x >= frame.width || y >= frame.height) {
+    const int destX = info.ptScreenPos.x - static_cast<int>(iconInfo.xHotspot) - originX;
+    const int destY = info.ptScreenPos.y - static_cast<int>(iconInfo.yHotspot) - originY;
+    if (destX + cursorW <= 0 || destY + cursorH <= 0 || destX >= frame.width || destY >= frame.height) {
         return;
     }
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = frame.width;
-    bmi.bmiHeader.biHeight = -frame.height;
+    bmi.bmiHeader.biWidth = cursorW;
+    bmi.bmiHeader.biHeight = -cursorH;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -95,25 +138,49 @@ void blitCursor(VideoFrame& frame, int originX, int originY)
         return;
     }
 
-    const int dstStride = frame.width * 4;
-    const int srcStride = frame.stride > 0 ? frame.stride : dstStride;
+    const int srcStride = frame.stride > 0 ? frame.stride : frame.width * 4;
+    const int dibStride = ((cursorW * 32 + 31) / 32) * 4;
     auto* dest = static_cast<std::uint8_t*>(bits);
-    for (int row = 0; row < frame.height; ++row) {
+    std::memset(dest, 0, static_cast<std::size_t>(dibStride) * static_cast<std::size_t>(cursorH));
+
+    for (int row = 0; row < cursorH; ++row) {
+        const int fy = destY + row;
+        if (fy < 0 || fy >= frame.height) {
+            continue;
+        }
+        const int x0 = std::max(0, destX);
+        const int x1 = std::min(frame.width, destX + cursorW);
+        if (x0 >= x1) {
+            continue;
+        }
         std::memcpy(
-            dest + static_cast<std::ptrdiff_t>(row) * dstStride,
-            frame.bytes.data() + static_cast<std::ptrdiff_t>(row) * srcStride,
-            static_cast<std::size_t>(dstStride));
+            dest + static_cast<std::ptrdiff_t>(row) * dibStride
+                + static_cast<std::ptrdiff_t>(x0 - destX) * 4,
+            frame.bytes.data() + static_cast<std::ptrdiff_t>(fy) * srcStride
+                + static_cast<std::ptrdiff_t>(x0) * 4,
+            static_cast<std::size_t>(x1 - x0) * 4);
     }
 
     HGDIOBJ old = SelectObject(hdc, dib);
-    DrawIconEx(hdc, x, y, info.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
+    DrawIconEx(hdc, 0, 0, info.hCursor, cursorW, cursorH, 0, nullptr, DI_NORMAL);
     SelectObject(hdc, old);
 
-    for (int row = 0; row < frame.height; ++row) {
+    for (int row = 0; row < cursorH; ++row) {
+        const int fy = destY + row;
+        if (fy < 0 || fy >= frame.height) {
+            continue;
+        }
+        const int x0 = std::max(0, destX);
+        const int x1 = std::min(frame.width, destX + cursorW);
+        if (x0 >= x1) {
+            continue;
+        }
         std::memcpy(
-            frame.bytes.data() + static_cast<std::ptrdiff_t>(row) * srcStride,
-            dest + static_cast<std::ptrdiff_t>(row) * dstStride,
-            static_cast<std::size_t>(dstStride));
+            frame.bytes.data() + static_cast<std::ptrdiff_t>(fy) * srcStride
+                + static_cast<std::ptrdiff_t>(x0) * 4,
+            dest + static_cast<std::ptrdiff_t>(row) * dibStride
+                + static_cast<std::ptrdiff_t>(x0 - destX) * 4,
+            static_cast<std::size_t>(x1 - x0) * 4);
     }
 
     DeleteObject(dib);
@@ -140,6 +207,11 @@ struct CaptureWin::Impl {
     ComPtr<ID3D11Texture2D> staging;
     VideoFrame lastFrame;
     bool haveLastFrame{false};
+    bool gdiMode{false};
+    std::chrono::steady_clock::time_point lastGdiGrab{};
+    std::chrono::steady_clock::time_point nextCfrDue{};
+    bool haveCfrDue{false};
+    int consecutiveBlank_{0};
 
     void resetGpu()
     {
@@ -149,6 +221,10 @@ struct CaptureWin::Impl {
         device.Reset();
         haveLastFrame = false;
         lastFrame = {};
+        lastGdiGrab = {};
+        nextCfrDue = {};
+        haveCfrDue = false;
+        consecutiveBlank_ = 0;
     }
 
     bool createStaging(ID3D11Texture2D* source)
@@ -174,7 +250,7 @@ struct CaptureWin::Impl {
         return true;
     }
 
-    bool copyMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped, VideoFrame& out)
+    bool copyMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped, VideoFrame& out, std::int64_t timestampNs)
     {
         width = std::min(width, outputWidth - cropX) & ~1;
         height = std::min(height, outputHeight - cropY) & ~1;
@@ -183,7 +259,7 @@ struct CaptureWin::Impl {
             return false;
         }
 
-        out.timestampNs = nowNs();
+        out.timestampNs = timestampNs != 0 ? timestampNs : nowNs();
         out.width = width;
         out.height = height;
         out.stride = width * 4;
@@ -199,13 +275,27 @@ struct CaptureWin::Impl {
                 src + static_cast<std::ptrdiff_t>(y) * mapped.RowPitch,
                 static_cast<std::size_t>(width) * 4);
         }
+
+        // DWM + WDA_EXCLUDEFROMCAPTURE can insert a one-frame black present.
+        if (isBlankBgra(out)) {
+            ++consecutiveBlank_;
+            if (haveLastFrame && consecutiveBlank_ == 1) {
+                out = lastFrame;
+                out.timestampNs = timestampNs != 0 ? timestampNs : nowNs();
+                applyCursor(out);
+                return true;
+            }
+        } else {
+            consecutiveBlank_ = 0;
+        }
+
         lastFrame = out;
         haveLastFrame = true;
         applyCursor(out);
         return true;
     }
 
-    GrabResult copyFromResource(IDXGIResource* resource, VideoFrame& out)
+    GrabResult copyFromResource(IDXGIResource* resource, VideoFrame& out, std::int64_t timestampNs)
     {
         ComPtr<ID3D11Texture2D> texture;
         HRESULT hr = resource->QueryInterface(IID_PPV_ARGS(&texture));
@@ -214,6 +304,16 @@ struct CaptureWin::Impl {
             return GrabResult::Failed;
         }
 
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        texture->GetDesc(&srcDesc);
+        if (staging) {
+            D3D11_TEXTURE2D_DESC stageDesc{};
+            staging->GetDesc(&stageDesc);
+            if (stageDesc.Width != srcDesc.Width || stageDesc.Height != srcDesc.Height
+                || stageDesc.Format != srcDesc.Format) {
+                staging.Reset();
+            }
+        }
         if (!staging && !createStaging(texture.Get())) {
             return GrabResult::Failed;
         }
@@ -227,17 +327,130 @@ struct CaptureWin::Impl {
             return GrabResult::Failed;
         }
 
-        const bool ok = copyMappedFrame(mapped, out);
+        const bool ok = copyMappedFrame(mapped, out, timestampNs);
         context->Unmap(staging.Get(), 0);
         return ok ? GrabResult::Ok : GrabResult::Failed;
     }
 
-    void applyCursor(VideoFrame& frame) const
+    void advanceCfrDeadline()
     {
-        if (!settings.includeCursor) {
+        const auto interval = std::chrono::nanoseconds(
+            1'000'000'000 / std::max(1, settings.frameRate));
+        const auto now = std::chrono::steady_clock::now();
+        if (!haveCfrDue) {
+            nextCfrDue = now + interval;
+            haveCfrDue = true;
             return;
         }
-        blitCursor(frame, desktopLeft + cropX, desktopTop + cropY);
+        nextCfrDue += interval;
+        if (nextCfrDue < now) {
+            nextCfrDue = now + interval;
+        }
+    }
+
+    GrabResult emitLastFrame(VideoFrame& out, std::int64_t timestampNs)
+    {
+        out = lastFrame;
+        out.timestampNs = timestampNs;
+        applyCursor(out);
+        if (!settings.variableFrameRate) {
+            advanceCfrDeadline();
+        }
+        return GrabResult::Ok;
+    }
+
+    void applyCursor(VideoFrame& frame) const
+    {
+        forceOpaqueAlpha(frame);
+        if (settings.includeCursor) {
+            blitCursor(frame, desktopLeft + cropX, desktopTop + cropY);
+        }
+    }
+
+    bool blitGdiFrame(VideoFrame& out)
+    {
+        width = std::max(2, width & ~1);
+        height = std::max(2, height & ~1);
+
+        HDC screen = GetDC(nullptr);
+        if (!screen) {
+            lastError = QStringLiteral("無法取得螢幕裝置內容");
+            return false;
+        }
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HDC mem = CreateCompatibleDC(screen);
+        if (!mem) {
+            ReleaseDC(nullptr, screen);
+            lastError = QStringLiteral("無法建立 GDI 暫存 DC");
+            return false;
+        }
+        HBITMAP dib = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib || !bits) {
+            DeleteDC(mem);
+            ReleaseDC(nullptr, screen);
+            lastError = QStringLiteral("無法建立 GDI 擷取緩衝");
+            return false;
+        }
+
+        HGDIOBJ old = SelectObject(mem, dib);
+        const int srcX = desktopLeft + cropX;
+        const int srcY = desktopTop + cropY;
+        DWORD rop = SRCCOPY | CAPTUREBLT;
+        if (!BitBlt(mem, 0, 0, width, height, screen, srcX, srcY, rop)) {
+            BitBlt(mem, 0, 0, width, height, screen, srcX, srcY, SRCCOPY);
+        }
+        SelectObject(mem, old);
+
+        out.timestampNs = nowNs();
+        out.width = width;
+        out.height = height;
+        out.stride = width * 4;
+        out.format = PixelFormat::BGRA8;
+        out.bytes.resize(static_cast<std::size_t>(out.stride) * static_cast<std::size_t>(height));
+        const int dibStride = ((width * 32 + 31) / 32) * 4;
+        const auto* src = static_cast<const std::uint8_t*>(bits);
+        for (int y = 0; y < height; ++y) {
+            auto* dst = out.bytes.data() + static_cast<std::ptrdiff_t>(y) * out.stride;
+            std::memcpy(
+                dst,
+                src + static_cast<std::ptrdiff_t>(y) * dibStride,
+                static_cast<std::size_t>(width) * 4);
+        }
+
+        DeleteObject(dib);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+
+        lastFrame = out;
+        haveLastFrame = true;
+        applyCursor(out);
+        return true;
+    }
+
+    GrabResult grabGdi(VideoFrame& out, bool pace)
+    {
+        if (pace && settings.frameRate > 0) {
+            const auto interval = std::chrono::milliseconds(std::max(8, 1000 / settings.frameRate));
+            const auto now = std::chrono::steady_clock::now();
+            if (lastGdiGrab.time_since_epoch().count() != 0) {
+                const auto elapsed = now - lastGdiGrab;
+                if (elapsed < interval) {
+                    Sleep(static_cast<DWORD>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(interval - elapsed).count()));
+                }
+            }
+            lastGdiGrab = std::chrono::steady_clock::now();
+        }
+        return blitGdiFrame(out) ? GrabResult::Ok : GrabResult::Failed;
     }
 
     bool recreateDuplication(IDXGIOutput1* output1)
@@ -282,6 +495,26 @@ bool CaptureWin::start(const CaptureSettings& settings)
     stop();
     impl_->settings = settings;
     impl_->lastError.clear();
+    impl_->gdiMode = settings.captureMode.compare(QLatin1String("gdi"), Qt::CaseInsensitive) == 0;
+
+    if (impl_->gdiMode) {
+        const int w = std::max(0, settings.width) & ~1;
+        const int h = std::max(0, settings.height) & ~1;
+        if (w < 2 || h < 2) {
+            impl_->lastError = QStringLiteral("擷取區域太小");
+            impl_->gdiMode = false;
+            return false;
+        }
+        impl_->desktopLeft = settings.x;
+        impl_->desktopTop = settings.y;
+        impl_->cropX = 0;
+        impl_->cropY = 0;
+        impl_->width = w;
+        impl_->height = h;
+        impl_->outputWidth = w;
+        impl_->outputHeight = h;
+        return true;
+    }
 
     ComPtr<IDXGIFactory1> factory;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
@@ -422,42 +655,43 @@ void CaptureWin::stop()
     if (impl_->duplication) {
         impl_->duplication->ReleaseFrame();
     }
+    impl_->gdiMode = false;
     impl_->resetGpu();
 }
 
 GrabResult CaptureWin::grab(VideoFrame& out)
 {
+    if (impl_->gdiMode) {
+        return impl_->grabGdi(out, true);
+    }
     if (!impl_->duplication) {
         return GrabResult::Failed;
     }
 
-    const UINT timeoutMs = impl_->settings.frameRate > 0
-        ? static_cast<UINT>(std::max(8, 1000 / impl_->settings.frameRate))
-        : 33;
+    const bool vfr = impl_->settings.variableFrameRate;
+    UINT timeoutMs = 200;
+    if (!vfr && impl_->haveLastFrame) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!impl_->haveCfrDue) {
+            timeoutMs = 1;
+        } else if (now >= impl_->nextCfrDue) {
+            timeoutMs = 1;
+        } else {
+            timeoutMs = static_cast<UINT>(std::max<std::int64_t>(
+                1,
+                std::chrono::duration_cast<std::chrono::milliseconds>(impl_->nextCfrDue - now).count()));
+        }
+    }
 
     DXGI_OUTDUPL_FRAME_INFO info{};
     ComPtr<IDXGIResource> resource;
     HRESULT hr = impl_->duplication->AcquireNextFrame(timeoutMs, &info, &resource);
+    const std::int64_t acquiredNs = nowNs();
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        if (!impl_->haveLastFrame) {
-            out.timestampNs = nowNs();
-            out.width = impl_->width;
-            out.height = impl_->height;
-            out.stride = impl_->width * 4;
-            out.format = PixelFormat::BGRA8;
-            out.bytes.assign(static_cast<std::size_t>(out.stride) * static_cast<std::size_t>(out.height), 0);
-            impl_->lastFrame = out;
-            impl_->haveLastFrame = true;
-            impl_->applyCursor(out);
-            return GrabResult::Ok;
-        }
-        if (impl_->settings.variableFrameRate) {
+        if (!impl_->haveLastFrame || vfr) {
             return GrabResult::Idle;
         }
-        out = impl_->lastFrame;
-        out.timestampNs = nowNs();
-        impl_->applyCursor(out);
-        return GrabResult::Ok;
+        return impl_->emitLastFrame(out, acquiredNs);
     }
     if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
         impl_->duplication.Reset();
@@ -480,11 +714,39 @@ GrabResult CaptureWin::grab(VideoFrame& out)
         }
     } release{impl_->duplication.Get()};
 
-    return impl_->copyFromResource(resource.Get(), out);
+    const bool desktopUpdated = resource && info.LastPresentTime.QuadPart != 0;
+    const std::int64_t timestampNs = acquiredNs;
+
+    if (!desktopUpdated) {
+        if (!impl_->haveLastFrame) {
+            if (resource) {
+                const GrabResult copied = impl_->copyFromResource(resource.Get(), out, timestampNs);
+                if (copied == GrabResult::Ok && !vfr) {
+                    impl_->advanceCfrDeadline();
+                }
+                return copied;
+            }
+            return vfr ? GrabResult::Idle : GrabResult::Failed;
+        }
+        if (vfr && !impl_->settings.includeCursor) {
+            return GrabResult::Idle;
+        }
+        return impl_->emitLastFrame(out, timestampNs);
+    }
+
+    const GrabResult copied = impl_->copyFromResource(resource.Get(), out, timestampNs);
+    if (copied == GrabResult::Ok && !vfr) {
+        impl_->advanceCfrDeadline();
+    }
+    return copied;
 }
 
 GrabResult CaptureWin::grabStill(VideoFrame& out, int timeoutMs)
 {
+    if (impl_->gdiMode) {
+        Q_UNUSED(timeoutMs);
+        return impl_->grabGdi(out, false);
+    }
     if (!impl_->duplication) {
         impl_->lastError = QStringLiteral("尚未啟動畫面擷取");
         return GrabResult::Failed;
@@ -496,6 +758,10 @@ GrabResult CaptureWin::grabStill(VideoFrame& out, int timeoutMs)
     while (true) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
+            if (impl_->blitGdiFrame(out)) {
+                impl_->lastError.clear();
+                return GrabResult::Ok;
+            }
             impl_->lastError = QStringLiteral("截圖逾時");
             return GrabResult::Failed;
         }
@@ -511,6 +777,10 @@ GrabResult CaptureWin::grabStill(VideoFrame& out, int timeoutMs)
         if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
             impl_->duplication.Reset();
             impl_->staging.Reset();
+            if (impl_->blitGdiFrame(out)) {
+                impl_->lastError.clear();
+                return GrabResult::Ok;
+            }
             impl_->lastError = QStringLiteral("桌面擷取連線中斷");
             return GrabResult::Failed;
         }
@@ -529,7 +799,11 @@ GrabResult CaptureWin::grabStill(VideoFrame& out, int timeoutMs)
             }
         } release{impl_->duplication.Get()};
 
-        return impl_->copyFromResource(resource.Get(), out);
+        if (!resource || info.LastPresentTime.QuadPart == 0) {
+            continue;
+        }
+
+        return impl_->copyFromResource(resource.Get(), out, nowNs());
     }
 }
 

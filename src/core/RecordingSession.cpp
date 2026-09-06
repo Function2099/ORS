@@ -1,6 +1,8 @@
 #include "core/RecordingSession.h"
 
 #include "core/AudioFrame.h"
+#include "core/Clock.h"
+#include "core/Config.h"
 #include "core/EncodedPacket.h"
 #include "core/FilenameTemplate.h"
 #include "core/FrameQueue.h"
@@ -26,7 +28,10 @@
 #include "audio/AudioCaptureWin.h"
 #include "audio/AudioMix.h"
 #include "capture/CaptureWin.h"
+#include "encode/IEncoder.h"
 #include "encode/MFEncoder.h"
+#include "mux/GifEncoder.h"
+#include "mux/IMuxer.h"
 #include "mux/Mp4Muxer.h"
 
 #include <mfapi.h>
@@ -57,8 +62,18 @@ QString uniqueOutputPath(const RecordingRequest& request)
         request.filenameTemplate,
         request.filenamePrefix,
         request.filenameStartNumber,
-        QStringLiteral(".mp4"),
+        Config::containerExtension(request.container),
         QDateTime::currentDateTime());
+}
+
+bool isGifContainer(const QString& container)
+{
+    return container.compare(QLatin1String("gif"), Qt::CaseInsensitive) == 0;
+}
+
+bool isMp4Container(const QString& container)
+{
+    return container.compare(QLatin1String("mp4"), Qt::CaseInsensitive) == 0;
 }
 
 std::int64_t pcmDurationNs(const AudioFrame& frame)
@@ -76,8 +91,9 @@ std::int64_t pcmDurationNs(const AudioFrame& frame)
 
 class RecordingSession::Pipeline {
 public:
-    explicit Pipeline(RecordingSession* session)
+    explicit Pipeline(RecordingSession* session, std::size_t videoCapacity)
         : session_(session)
+        , videoQueue_(videoCapacity)
     {}
 
     ~Pipeline()
@@ -95,24 +111,33 @@ public:
             return false;
         }
 
-        const HRESULT mfHr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
-        if (FAILED(mfHr)) {
-            error = QStringLiteral("無法初始化 Media Foundation");
-            return false;
+        const bool gif = isGifContainer(request.container);
+        if (!gif) {
+            const HRESULT mfHr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+            if (FAILED(mfHr)) {
+                error = QStringLiteral("無法初始化 Media Foundation");
+                return false;
+            }
+            mfStarted_ = true;
         }
-        mfStarted_ = true;
 
         capture_ = std::make_unique<CaptureWin>();
         encoder_ = std::make_unique<MFEncoder>();
-        muxer_ = std::make_unique<Mp4Muxer>();
+        if (gif) {
+            muxer_ = std::make_unique<GifEncoder>();
+        } else {
+            muxer_ = std::make_unique<Mp4Muxer>();
+        }
 
-        wantAudio_ = request.audio.systemAudio || !request.audio.microphoneId.isEmpty();
-        if (request.audio.systemAudio) {
+        wantAudio_ = !gif && (request.audio.systemAudio || !request.audio.microphoneId.isEmpty());
+        if (wantAudio_ && request.audio.systemAudio) {
             systemAudio_ = std::make_unique<AudioCaptureWin>();
         }
-        if (!request.audio.microphoneId.isEmpty()) {
+        if (wantAudio_ && !request.audio.microphoneId.isEmpty()) {
             micAudio_ = std::make_unique<AudioCaptureWin>();
         }
+
+        watermark_.load(request.watermark);
 
         captureThread_ = std::thread([this] { captureLoop(); });
 
@@ -174,6 +199,25 @@ public:
         videoQueue_.wake();
         audioQueue_.wake();
         readyCv_.notify_all();
+        snapshotCv_.notify_all();
+    }
+
+    bool grabSnapshot(VideoFrame& out, int timeoutMs)
+    {
+        std::unique_lock lock(snapshotMutex_);
+        snapshotReady_ = false;
+        snapshotRequested_.store(true, std::memory_order_release);
+        const bool ok = snapshotCv_.wait_for(
+            lock,
+            std::chrono::milliseconds(std::max(1, timeoutMs)),
+            [this] { return snapshotReady_ || stop_.load(); });
+        snapshotRequested_.store(false, std::memory_order_release);
+        if (!ok || !snapshotReady_ || snapshotOut_.bytes.empty()) {
+            return false;
+        }
+        out = std::move(snapshotOut_);
+        snapshotReady_ = false;
+        return true;
     }
 
     void setPaused(bool paused)
@@ -246,13 +290,36 @@ private:
                 break;
             }
             if (grabbed == GrabResult::Idle) {
+                fulfillSnapshot(frame);
                 continue;
             }
+            fulfillSnapshot(frame);
             if (!paused_.load()) {
+                watermark_.apply(frame);
                 videoQueue_.push(std::move(frame));
             }
         }
         capture_->stop();
+        snapshotCv_.notify_all();
+    }
+
+    void fulfillSnapshot(const VideoFrame& frame)
+    {
+        if (!snapshotRequested_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (frame.format != PixelFormat::BGRA8 || frame.width < 2 || frame.height < 2
+            || frame.bytes.empty()) {
+            return;
+        }
+        std::lock_guard lock(snapshotMutex_);
+        if (!snapshotRequested_.load(std::memory_order_relaxed) || snapshotReady_) {
+            return;
+        }
+        snapshotOut_ = frame;
+        snapshotReady_ = true;
+        snapshotRequested_.store(false, std::memory_order_release);
+        snapshotCv_.notify_all();
     }
 
     void audioLoop()
@@ -385,16 +452,17 @@ private:
 
         MuxerOpenParams muxParams;
         muxParams.filePath = outputPath;
-        muxParams.videoWidth = encoderSettings.width;
-        muxParams.videoHeight = encoderSettings.height;
+        muxParams.videoWidth = encoderSettings.width & ~1;
+        muxParams.videoHeight = encoderSettings.height & ~1;
         muxParams.videoFrameRate = encoderSettings.frameRate;
         muxParams.videoBitrateKbps = encoderSettings.bitrateKbps > 0 ? encoderSettings.bitrateKbps : 8000;
         muxParams.keyframeGopFrames = encoderSettings.keyframeGopFrames;
+        muxParams.encoderThreads = request_.encoderThreads;
         muxParams.hasAudio = wantAudio_ && audioReady_;
         muxParams.audioSampleRate = request_.audio.sampleRate;
         muxParams.audioChannels = 2;
         if (!muxer_->open(muxParams)) {
-            fail(muxer_->lastError().isEmpty() ? QStringLiteral("無法建立 MP4 檔案") : muxer_->lastError());
+            fail(muxer_->lastError().isEmpty() ? QStringLiteral("無法建立輸出檔案") : muxer_->lastError());
             encoder_->close();
             notifySessionDone();
             return;
@@ -406,15 +474,37 @@ private:
         VideoFrame video;
         AudioFrame audio;
         EncodedPacket packet;
+        EncodedPacket pendingVideo;
+        bool hasPendingVideo = false;
+        const std::int64_t fallbackDurationNs =
+            1'000'000'000 / std::max(1, encoderSettings.frameRate);
+
+        const auto holdVideo = [&](EncodedPacket incoming) -> bool {
+            if (hasPendingVideo) {
+                incoming.timestampNs = monotonicTimestampNs(
+                    pendingVideo.timestampNs,
+                    incoming.timestampNs,
+                    1'000'000);
+                pendingVideo.durationNs = sampleDurationNs(
+                    pendingVideo.timestampNs,
+                    incoming.timestampNs,
+                    fallbackDurationNs);
+                if (!muxer_->writeVideo(pendingVideo) && !stop_.load()) {
+                    fail(muxer_->lastError().isEmpty()
+                             ? QStringLiteral("寫入視訊失敗")
+                             : muxer_->lastError());
+                    return false;
+                }
+            }
+            pendingVideo = std::move(incoming);
+            hasPendingVideo = true;
+            return true;
+        };
+
         while (!stop_.load()) {
             if (videoQueue_.waitPop(video, std::chrono::milliseconds(15))) {
-                if (encoder_->encode(video, packet)) {
-                    if (!muxer_->writeVideo(packet) && !stop_.load()) {
-                        fail(muxer_->lastError().isEmpty()
-                                 ? QStringLiteral("寫入視訊失敗")
-                                 : muxer_->lastError());
-                        break;
-                    }
+                if (encoder_->encode(video, packet) && !holdVideo(std::move(packet))) {
+                    break;
                 }
             }
             while (audioQueue_.pop(audio)) {
@@ -429,7 +519,7 @@ private:
 
         while (videoQueue_.pop(video)) {
             if (encoder_->encode(video, packet)) {
-                muxer_->writeVideo(packet);
+                holdVideo(std::move(packet));
             }
         }
         while (audioQueue_.pop(audio)) {
@@ -443,12 +533,16 @@ private:
 
         std::vector<EncodedPacket> flushed;
         encoder_->flush(flushed);
-        for (const EncodedPacket& item : flushed) {
-            muxer_->writeVideo(item);
+        for (EncodedPacket& item : flushed) {
+            holdVideo(std::move(item));
+        }
+        if (hasPendingVideo) {
+            pendingVideo.durationNs = fallbackDurationNs;
+            muxer_->writeVideo(pendingVideo);
         }
         encoder_->close();
         if (!muxer_->finalize() && error.isEmpty()) {
-            error = muxer_->lastError().isEmpty() ? QStringLiteral("無法完成 MP4 封裝") : muxer_->lastError();
+            error = muxer_->lastError().isEmpty() ? QStringLiteral("無法完成輸出檔案") : muxer_->lastError();
         }
         notifySessionDone();
     }
@@ -468,8 +562,9 @@ private:
     std::unique_ptr<CaptureWin> capture_;
     std::unique_ptr<AudioCaptureWin> systemAudio_;
     std::unique_ptr<AudioCaptureWin> micAudio_;
-    std::unique_ptr<MFEncoder> encoder_;
-    std::unique_ptr<Mp4Muxer> muxer_;
+    std::unique_ptr<IEncoder> encoder_;
+    std::unique_ptr<IMuxer> muxer_;
+    WatermarkOverlay watermark_;
     FrameQueue<VideoFrame> videoQueue_{4};
     FrameQueue<AudioFrame> audioQueue_{8};
     std::thread captureThread_;
@@ -477,6 +572,11 @@ private:
     std::thread encodeThread_;
     std::mutex mutex_;
     std::condition_variable readyCv_;
+    std::mutex snapshotMutex_;
+    std::condition_variable snapshotCv_;
+    VideoFrame snapshotOut_;
+    bool snapshotReady_{false};
+    std::atomic<bool> snapshotRequested_{false};
     std::atomic<bool> stop_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> captureReady_{false};
@@ -513,8 +613,8 @@ bool RecordingSession::start(const RecordingRequest& request)
     emit errorOccurred(tr("目前僅支援 Windows 錄製"));
     return false;
 #else
-    if (request.container.compare(QLatin1String("mp4"), Qt::CaseInsensitive) != 0) {
-        emit errorOccurred(tr("目前僅支援 MP4 輸出"));
+    if (!isMp4Container(request.container) && !isGifContainer(request.container)) {
+        emit errorOccurred(tr("目前僅支援 MP4 與 GIF 輸出"));
         return false;
     }
     if (request.capture.width < 2 || request.capture.height < 2) {
@@ -522,7 +622,8 @@ bool RecordingSession::start(const RecordingRequest& request)
         return false;
     }
 
-    pipeline_ = std::make_unique<Pipeline>(this);
+    pipeline_ = std::make_unique<Pipeline>(
+        this, static_cast<std::size_t>(Config::frameQueueCapacity(request.pipelineLayers)));
     if (!pipeline_->start(request)) {
         const QString message = pipeline_->error.isEmpty()
             ? tr("無法開始錄製")
@@ -549,6 +650,19 @@ void RecordingSession::pause()
     }
 #endif
     setState(State::Paused);
+}
+
+bool RecordingSession::snapshotFrame(VideoFrame& out)
+{
+#ifndef Q_OS_WIN
+    Q_UNUSED(out);
+    return false;
+#else
+    if (state_ == State::Idle || !pipeline_) {
+        return false;
+    }
+    return pipeline_->grabSnapshot(out, 1000);
+#endif
 }
 
 void RecordingSession::resume()

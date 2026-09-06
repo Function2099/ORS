@@ -16,7 +16,7 @@ public:
     bool writeAudio(const EncodedPacket& packet) override;
     bool finalize() override;
 
-    QString lastError() const;
+    QString lastError() const override;
 
 private:
     struct Impl;

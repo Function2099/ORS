@@ -2,13 +2,22 @@
 
 #include "audio/AudioDevices.h"
 #include "core/FilenameTemplate.h"
+#include "core/WatermarkOverlay.h"
 #include "ui/RegionOverlay.h"
 #include "ui/SettingsDialog.h"
 #include "ui/ToolbarIcons.h"
 
 #ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include "capture/CaptureWin.h"
 #include "core/VideoFrame.h"
+#include <windows.h>
+#include <powrprof.h>
 #endif
 
 #include <QAction>
@@ -16,6 +25,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
@@ -23,11 +33,13 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEvent>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
+#include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
@@ -36,12 +48,15 @@
 #include <QShowEvent>
 #include <QSizePolicy>
 #include <QSpinBox>
+#include <QStorageInfo>
+#include <QStringList>
 #include <QSystemTrayIcon>
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QVector>
 #include <QWidget>
 
 #include <algorithm>
@@ -102,6 +117,24 @@ QString captureExtension(const QString& format)
     return QStringLiteral(".png");
 }
 
+QString formatByteSize(qint64 bytes)
+{
+    const qint64 clamped = std::max<qint64>(0, bytes);
+    const auto locale = QLocale::c();
+    if (clamped >= 1024LL * 1024 * 1024) {
+        return locale.toString(static_cast<double>(clamped) / (1024.0 * 1024.0 * 1024.0), 'f', 2)
+            + QStringLiteral("GB");
+    }
+    if (clamped >= 1024LL * 1024) {
+        return locale.toString(static_cast<double>(clamped) / (1024.0 * 1024.0), 'f', 2)
+            + QStringLiteral("MB");
+    }
+    if (clamped >= 1024) {
+        return locale.toString(static_cast<double>(clamped) / 1024.0, 'f', 1) + QStringLiteral("KB");
+    }
+    return locale.toString(static_cast<qlonglong>(clamped)) + QStringLiteral("B");
+}
+
 #ifdef Q_OS_WIN
 QImage imageFromBgra(const VideoFrame& frame)
 {
@@ -115,8 +148,12 @@ QImage imageFromBgra(const VideoFrame& frame)
     const int srcStride = frame.stride > 0 ? frame.stride : frame.width * 4;
     const int rowBytes = frame.width * 4;
     for (int y = 0; y < frame.height; ++y) {
-        std::memcpy(image.scanLine(y), frame.bytes.data() + static_cast<std::ptrdiff_t>(y) * srcStride,
+        auto* dst = image.scanLine(y);
+        std::memcpy(dst, frame.bytes.data() + static_cast<std::ptrdiff_t>(y) * srcStride,
             static_cast<std::size_t>(rowBytes));
+        for (int x = 0; x < frame.width; ++x) {
+            dst[x * 4 + 3] = 255;
+        }
     }
     return image;
 }
@@ -171,6 +208,7 @@ MainWindow::MainWindow(QWidget* parent)
     config_.load();
     setupUi();
     applyConfigToUi();
+    hotkeys_.setHandler([this](HotkeyAction action) { onHotkey(action); });
 
     connect(&session_, &RecordingSession::errorOccurred, this, &MainWindow::onSessionError);
     connect(&session_, &RecordingSession::stateChanged, this, [this](RecordingSession::State) {
@@ -185,11 +223,15 @@ MainWindow::MainWindow(QWidget* parent)
     updateChrome();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+    hotkeys_.unregisterAll();
+}
 
 void MainWindow::present()
 {
     applyConfigToUi();
+    registerHotkeys();
     if (config_.data().hideOnStartup && trayActive()) {
         return;
     }
@@ -210,6 +252,7 @@ void MainWindow::setupUi()
 
     auto* modes = new QWidget(root);
     modes->setObjectName(QStringLiteral("modeRow"));
+    modeRow_ = modes;
     setupModeRow(modes);
 
     auto* actions = new QWidget(root);
@@ -218,6 +261,7 @@ void MainWindow::setupUi()
 
     auto* status = new QWidget(root);
     status->setObjectName(QStringLiteral("statusRow"));
+    statusRow_ = status;
     setupStatus(status);
 
     auto* layout = new QVBoxLayout(root);
@@ -279,6 +323,12 @@ void MainWindow::setupUi()
         "#statusRow { background: #efeae3; }"
         "#statusLabel { color: #1f4e4c; font-weight: 600; }"
         "#timerLabel { color: #1f4e4c; font-family: Consolas, 'Cascadia Mono', monospace; }"
+        "#recordingStatsLabel {"
+        "  color: #1f4e4c;"
+        "  font-family: Consolas, 'Cascadia Mono', monospace;"
+        "  font-size: 12px;"
+        "  font-weight: 600;"
+        "}"
         "#metaLabel { color: #6b7573; }"));
 }
 
@@ -337,6 +387,13 @@ void MainWindow::setupActions(QWidget* parent)
     recordButton_->setToolTip(tr("錄製"));
     connect(recordButton_, &QToolButton::clicked, this, &MainWindow::onRecord);
 
+    pauseButton_ = makeActionButton(parent, QStringLiteral("chipButton"));
+    pauseButton_->setIcon(toolbarIcon(ToolbarGlyph::Pause, 28, kIconColor));
+    pauseButton_->setText(tr("暫停"));
+    pauseButton_->setToolTip(tr("暫停"));
+    pauseButton_->setVisible(false);
+    connect(pauseButton_, &QToolButton::clicked, this, &MainWindow::onPauseToggle);
+
     regionMenu_ = new QMenu(tr("範圍"), this);
     regionMenu_->addAction(tr("全螢幕"), this, [this] { onRegionPreset(QStringLiteral("fullscreen")); });
     regionMenu_->addAction(tr("主要顯示器"), this, [this] { onRegionPreset(QStringLiteral("monitor-primary")); });
@@ -357,6 +414,7 @@ void MainWindow::setupActions(QWidget* parent)
 
     codecMenu_ = new QMenu(tr("輸出格式"), this);
     codecMenu_->addAction(tr("H.264 + AAC (.MP4)"), this, [this] { onCodecSelected(QStringLiteral("mp4")); });
+    codecMenu_->addAction(tr("GIF (.GIF)"), this, [this] { onCodecSelected(QStringLiteral("gif")); });
     codecMenu_->addAction(tr("WMV"), this, [this] { onCodecSelected(QStringLiteral("wmv")); });
     codecMenu_->addSeparator();
     auto* later = codecMenu_->addAction(tr("其他容器（後續 Phase）"));
@@ -399,15 +457,30 @@ void MainWindow::setupActions(QWidget* parent)
     soundButton_->setMenu(soundMenu_);
     soundButton_->setPopupMode(QToolButton::InstantPopup);
 
+    actionSpacer_ = new QWidget(parent);
+    actionSpacer_->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+    actionSpacer_->setMinimumWidth(8);
+    actionSpacer_->hide();
+
+    recordingStatsLabel_ = new QLabel(parent);
+    recordingStatsLabel_->setObjectName(QStringLiteral("recordingStatsLabel"));
+    recordingStatsLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    recordingStatsLabel_->setMinimumWidth(188);
+    recordingStatsLabel_->setToolTip(tr("已錄製容量 / 剩餘磁碟空間"));
+    recordingStatsLabel_->hide();
+
     auto* layout = new QHBoxLayout(parent);
     layout->setContentsMargins(8, 4, 8, 4);
     layout->setSpacing(4);
     layout->addWidget(recordButton_);
+    layout->addWidget(pauseButton_);
     layout->addWidget(captureButton_);
     layout->addWidget(regionButton_);
     layout->addWidget(openButton_);
     layout->addWidget(codecButton_);
     layout->addWidget(soundButton_);
+    layout->addWidget(actionSpacer_);
+    layout->addWidget(recordingStatsLabel_);
 }
 
 void MainWindow::setupStatus(QWidget* parent)
@@ -520,68 +593,77 @@ void MainWindow::updateChrome()
 {
     const bool idle = session_.state() == RecordingSession::State::Idle;
     const bool recording = session_.state() == RecordingSession::State::Recording;
-    const QRect region = currentRegionRect();
+    const bool paused = session_.state() == RecordingSession::State::Paused;
+    const bool live = !idle;
     setWindowTitle(tr("ORS"));
     statusLabel_->setText(stateText());
     timerLabel_->setText(formatElapsed(currentElapsedMs()));
-    metaLabel_->setText(tr("%1 · %2×%3 · %4")
-                            .arg(modeHint())
-                            .arg(region.width())
-                            .arg(region.height())
-                            .arg(config_.data().container.toUpper()));
+    metaLabel_->setText(idleMetaText());
 
     recordButton_->setText(idle ? tr("錄製") : tr("停止"));
     recordButton_->setIcon(toolbarIcon(idle ? ToolbarGlyph::Record : ToolbarGlyph::Stop, 28, kRecordIcon));
     recordButton_->setToolTip(idle ? tr("錄製") : tr("停止"));
+    pauseButton_->setVisible(live);
+    pauseButton_->setText(paused ? tr("繼續") : tr("暫停"));
+    pauseButton_->setIcon(toolbarIcon(paused ? ToolbarGlyph::Resume : ToolbarGlyph::Pause, 28, kIconColor));
+    pauseButton_->setToolTip(paused ? tr("繼續") : tr("暫停"));
+
+    actionSpacer_->setVisible(live);
+    recordingStatsLabel_->setVisible(live);
+    regionButton_->setVisible(idle && tabGroup_->checkedId() <= 0);
+    openButton_->setVisible(idle);
+    codecButton_->setVisible(idle);
+    soundButton_->setVisible(idle);
+    captureButton_->setVisible(live || tabGroup_->checkedId() != 2);
+
     screenTab_->setEnabled(idle);
     gameTab_->setEnabled(idle);
     audioTab_->setEnabled(idle);
-    captureButton_->setEnabled(idle);
+    captureButton_->setEnabled(true);
     regionButton_->setEnabled(idle);
     codecButton_->setEnabled(idle);
     soundButton_->setEnabled(idle);
     settingsButton_->setEnabled(idle);
     updateOverlayVisibility();
-
-    if (recording) {
-        if (!uiTimer_->isActive()) {
-            recClock_.restart();
-            uiTimer_->start();
-        }
-    } else {
-        uiTimer_->stop();
-        if (session_.state() == RecordingSession::State::Paused && recClock_.isValid()) {
+    if (live) {
+        if (paused && recClock_.isValid()) {
             recordedMs_ += recClock_.elapsed();
             recClock_.invalidate();
         }
-        if (idle) {
-            recordedMs_ = 0;
-            recClock_.invalidate();
-            timerLabel_->setText(QStringLiteral("00:00:00"));
-        } else {
-            timerLabel_->setText(formatElapsed(currentElapsedMs()));
+        if (recording && !recClock_.isValid()) {
+            recClock_.restart();
         }
+        if (!uiTimer_->isActive()) {
+            uiTimer_->start();
+        }
+        if (!storageClock_.isValid()) {
+            updateRecordingStats();
+            storageClock_.restart();
+        }
+    } else {
+        uiTimer_->stop();
+        recordedMs_ = 0;
+        recClock_.invalidate();
+        storageClock_.invalidate();
+        timerLabel_->setText(QStringLiteral("00:00:00"));
     }
 }
 
 void MainWindow::updateActionsForTab(int index)
 {
+    const bool idle = session_.state() == RecordingSession::State::Idle;
     const bool screen = index <= 0;
     const bool audio = index == 2;
-    captureButton_->setVisible(!audio);
-    regionButton_->setVisible(screen);
+    captureButton_->setVisible(!idle || !audio);
+    regionButton_->setVisible(idle && screen);
     updateOverlayVisibility();
 }
 
 void MainWindow::setupRegionOverlay()
 {
     overlay_ = new RegionOverlay(this);
-    connect(overlay_, &RegionOverlay::regionChanged, this, [this](const QRect& region) {
-        metaLabel_->setText(tr("%1 · %2×%3 · %4")
-                                .arg(modeHint())
-                                .arg(region.width())
-                                .arg(region.height())
-                                .arg(config_.data().container.toUpper()));
+    connect(overlay_, &RegionOverlay::regionChanged, this, [this](const QRect&) {
+        metaLabel_->setText(idleMetaText());
     });
     connect(overlay_, &RegionOverlay::regionCommitted, this, [this](const QRect&) {
         persistOverlayRect(true);
@@ -757,15 +839,27 @@ void MainWindow::onRecord()
         QMessageBox::information(this, tr("ORS"), tr("僅音訊錄製將在後續 Phase 實作。"));
         return;
     }
-    if (config_.data().container.compare(QLatin1String("mp4"), Qt::CaseInsensitive) != 0) {
-        QMessageBox::information(this, tr("ORS"), tr("目前僅支援 MP4 輸出。"));
+    const QString container = config_.data().container;
+    if (container.compare(QLatin1String("mp4"), Qt::CaseInsensitive) != 0
+        && container.compare(QLatin1String("gif"), Qt::CaseInsensitive) != 0) {
+        QMessageBox::information(this, tr("ORS"), tr("目前僅支援 MP4 與 GIF 輸出。"));
         return;
     }
 
     recordedMs_ = 0;
     recClock_.invalidate();
+    timeLimitHit_ = false;
     persistOverlayRect(config_.data().regionPreset == QLatin1String("custom"));
     session_.start(makeRecordingRequest());
+}
+
+void MainWindow::onPauseToggle()
+{
+    if (session_.state() == RecordingSession::State::Recording) {
+        session_.pause();
+    } else if (session_.state() == RecordingSession::State::Paused) {
+        session_.resume();
+    }
 }
 
 void MainWindow::onCapture()
@@ -773,10 +867,6 @@ void MainWindow::onCapture()
 #ifndef Q_OS_WIN
     QMessageBox::information(this, tr("ORS"), tr("目前僅支援 Windows 截圖。"));
 #else
-    if (session_.state() != RecordingSession::State::Idle) {
-        return;
-    }
-
     persistOverlayRect(config_.data().regionPreset == QLatin1String("custom"));
     const QRect region = overlay_ ? overlay_->captureRectNative() : currentRegionRect();
     if (region.width() < 2 || region.height() < 2) {
@@ -784,6 +874,7 @@ void MainWindow::onCapture()
         return;
     }
 
+    const bool live = session_.state() != RecordingSession::State::Idle;
     const bool overlayWasVisible = overlay_ && overlay_->isVisible();
     if (overlay_) {
         overlay_->hide();
@@ -791,30 +882,35 @@ void MainWindow::onCapture()
     QApplication::processEvents();
     QThread::msleep(50);
 
-    CaptureSettings settings;
-    settings.source = CaptureSource::Screen;
-    settings.x = region.x();
-    settings.y = region.y();
-    settings.width = region.width();
-    settings.height = region.height();
-    settings.includeCursor = config_.data().captureIncludeCursor;
-    settings.variableFrameRate = false;
-    settings.frameRate = 30;
-
-    CaptureWin capture;
     VideoFrame frame;
     QString error;
-    bool ok = false;
-    if (!capture.start(settings)) {
-        error = capture.lastError().isEmpty() ? tr("畫面擷取啟動失敗") : capture.lastError();
-    } else {
-        const GrabResult result = capture.grabStill(frame, 2000);
-        if (result != GrabResult::Ok) {
-            error = capture.lastError().isEmpty() ? tr("截圖失敗") : capture.lastError();
+    bool ok = live && session_.snapshotFrame(frame);
+    if (!ok) {
+        CaptureSettings settings;
+        settings.source = CaptureSource::Screen;
+        settings.x = region.x();
+        settings.y = region.y();
+        settings.width = region.width();
+        settings.height = region.height();
+        settings.includeCursor = config_.data().captureIncludeCursor;
+        settings.variableFrameRate = false;
+        settings.frameRate = 30;
+        settings.captureMode = live
+            ? QStringLiteral("gdi")
+            : Config::normalizedCaptureMode(config_.data().captureMode);
+
+        CaptureWin capture;
+        if (!capture.start(settings)) {
+            error = capture.lastError().isEmpty() ? tr("畫面擷取啟動失敗") : capture.lastError();
         } else {
-            ok = true;
+            const GrabResult result = capture.grabStill(frame, 2000);
+            if (result != GrabResult::Ok) {
+                error = capture.lastError().isEmpty() ? tr("截圖失敗") : capture.lastError();
+            } else {
+                ok = true;
+            }
+            capture.stop();
         }
-        capture.stop();
     }
 
     if (overlayWasVisible) {
@@ -824,6 +920,18 @@ void MainWindow::onCapture()
     if (!ok) {
         QMessageBox::warning(this, tr("ORS"), error);
         return;
+    }
+
+    if (config_.data().watermarkEnabled && config_.data().watermarkApplyToCapture) {
+        WatermarkOverlay overlay;
+        overlay.load({
+            true,
+            config_.data().watermarkImagePath,
+            Config::normalizedWatermarkOpacity(config_.data().watermarkOpacity),
+            Config::normalizedWatermarkOffset(config_.data().watermarkX),
+            Config::normalizedWatermarkOffset(config_.data().watermarkY),
+        });
+        overlay.apply(frame);
     }
 
     const QImage image = imageFromBgra(frame);
@@ -876,6 +984,7 @@ void MainWindow::onOpenFolder()
 
 void MainWindow::onSettings()
 {
+    hotkeys_.unregisterAll();
     settingsOpen_ = true;
     updateOverlayVisibility();
     SettingsDialog dialog(config_, this);
@@ -886,6 +995,7 @@ void MainWindow::onSettings()
         applyConfigToUi();
         updateChrome();
     }
+    registerHotkeys();
     updateOverlayVisibility();
 }
 
@@ -914,6 +1024,9 @@ void MainWindow::onCodecSelected(const QString& container)
     if (container == QLatin1String("wmv")) {
         config_.data().video = QStringLiteral("wmv");
         config_.data().audio = QStringLiteral("wma");
+    } else if (container == QLatin1String("gif")) {
+        config_.data().video = QStringLiteral("gif");
+        config_.data().audio.clear();
     } else {
         config_.data().video = QStringLiteral("h264");
         config_.data().audio = QStringLiteral("aac");
@@ -1007,19 +1120,101 @@ void MainWindow::onSessionFinished(const QString& path)
     if (!path.isEmpty()) {
         metaLabel_->setText(tr("已儲存 %1").arg(path));
     }
+    const bool hit = timeLimitHit_;
+    timeLimitHit_ = false;
+    if (hit && !path.isEmpty()) {
+        applyTimeLimitAction();
+    }
 }
 
 void MainWindow::onTimerTick()
 {
     timerLabel_->setText(formatElapsed(currentElapsedMs()));
+    const int intervalMs = Config::normalizedStorageUpdateSeconds(config_.data().storageUpdateSeconds) * 1000;
+    if (!storageClock_.isValid() || storageClock_.elapsed() >= intervalMs) {
+        updateRecordingStats();
+        storageClock_.restart();
+    }
+    if (timeLimitHit_ || !config_.data().timeLimitEnabled) {
+        return;
+    }
+    if (session_.state() != RecordingSession::State::Recording) {
+        return;
+    }
+    if (currentElapsedMs() < Config::timeLimitDurationMs(config_.data())) {
+        return;
+    }
+    timeLimitHit_ = true;
+    session_.stop();
+}
+
+void MainWindow::applyTimeLimitAction()
+{
+    const QString action = Config::normalizedTimeLimitAction(config_.data().timeLimitAction);
+    if (action == QLatin1String("restart")) {
+        QTimer::singleShot(0, this, [this] { onRecord(); });
+        return;
+    }
+    if (action == QLatin1String("quit")) {
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+        return;
+    }
+    if (action == QLatin1String("shutdown")) {
+        requestSystemShutdown();
+        return;
+    }
+    if (action == QLatin1String("sleep")) {
+        requestSystemSleep();
+    }
+}
+
+void MainWindow::requestSystemShutdown()
+{
+#ifdef Q_OS_WIN
+    HANDLE token = nullptr;
+    TOKEN_PRIVILEGES privileges{};
+    bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) != FALSE;
+    if (ok) {
+        ok = LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME, &privileges.Privileges[0].Luid) != FALSE;
+    }
+    if (ok) {
+        privileges.PrivilegeCount = 1;
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        SetLastError(ERROR_SUCCESS);
+        ok = AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr) != FALSE
+            && GetLastError() == ERROR_SUCCESS;
+    }
+    if (token) {
+        CloseHandle(token);
+    }
+    if (!ok || ExitWindowsEx(EWX_SHUTDOWN | EWX_FORCEIFHUNG, 0) == FALSE) {
+        QMessageBox::warning(this, tr("ORS"), tr("無法關機。"));
+    }
+#else
+    QMessageBox::warning(this, tr("ORS"), tr("目前僅支援 Windows 關機。"));
+#endif
+}
+
+void MainWindow::requestSystemSleep()
+{
+#ifdef Q_OS_WIN
+    if (SetSuspendState(FALSE, FALSE, FALSE) == FALSE) {
+        QMessageBox::warning(this, tr("ORS"), tr("無法讓電腦休眠。"));
+    }
+#else
+    QMessageBox::warning(this, tr("ORS"), tr("目前僅支援 Windows 休眠。"));
+#endif
 }
 
 RecordingRequest MainWindow::makeRecordingRequest() const
 {
     const QRect region = overlay_ ? overlay_->captureRectNative() : currentRegionRect();
+    const bool gif = config_.data().container.compare(QLatin1String("gif"), Qt::CaseInsensitive) == 0;
     int width = region.width();
     int height = region.height();
-    Config::alignCaptureSize(config_.data(), width, height);
+    if (!gif) {
+        Config::alignCaptureSize(config_.data(), width, height);
+    }
 
     RecordingRequest request;
     request.capture.source = CaptureSource::Screen;
@@ -1027,13 +1222,21 @@ RecordingRequest MainWindow::makeRecordingRequest() const
     request.capture.y = region.y();
     request.capture.width = width;
     request.capture.height = height;
-    request.capture.frameRate = std::clamp(config_.data().frameRate, 1, 120);
-    request.capture.includeCursor = config_.data().includeCursor;
-    request.capture.variableFrameRate =
-        config_.data().frameRateMode.compare(QLatin1String("vfr"), Qt::CaseInsensitive) == 0;
-    request.audio.systemAudio = config_.data().systemAudio;
-    request.audio.microphoneId = config_.data().microphoneId;
-    request.audio.inputSource = config_.data().microphoneInputSource;
+    request.capture.frameRate = gif
+        ? Config::normalizedGifFrameRate(config_.data().gifFrameRate)
+        : Config::normalizedFrameRate(config_.data().frameRate);
+    request.capture.includeCursor = gif ? config_.data().gifIncludeCursor : config_.data().includeCursor;
+    request.capture.variableFrameRate = !gif
+        && config_.data().frameRateMode.compare(QLatin1String("vfr"), Qt::CaseInsensitive) == 0;
+    request.capture.captureMode = Config::normalizedCaptureMode(config_.data().captureMode);
+    if (gif) {
+        request.audio.systemAudio = false;
+        request.audio.microphoneId.clear();
+    } else {
+        request.audio.systemAudio = config_.data().systemAudio;
+        request.audio.microphoneId = config_.data().microphoneId;
+        request.audio.inputSource = config_.data().microphoneInputSource;
+    }
     request.encoder.width = request.capture.width;
     request.encoder.height = request.capture.height;
     request.encoder.frameRate = request.capture.frameRate;
@@ -1044,7 +1247,14 @@ RecordingRequest MainWindow::makeRecordingRequest() const
     request.filenameTemplate = config_.data().filenameTemplate;
     request.filenamePrefix = config_.data().filenamePrefix;
     request.filenameStartNumber = config_.data().filenameStartNumber;
-    request.container = QStringLiteral("mp4");
+    request.container = config_.data().container;
+    request.pipelineLayers = Config::normalizedPipelineLayers(config_.data().pipelineLayers);
+    request.encoderThreads = Config::effectiveEncoderThreads(config_.data());
+    request.watermark.enabled = config_.data().watermarkEnabled;
+    request.watermark.imagePath = config_.data().watermarkImagePath;
+    request.watermark.opacity = Config::normalizedWatermarkOpacity(config_.data().watermarkOpacity);
+    request.watermark.x = Config::normalizedWatermarkOffset(config_.data().watermarkX);
+    request.watermark.y = Config::normalizedWatermarkOffset(config_.data().watermarkY);
     return request;
 }
 
@@ -1116,6 +1326,45 @@ QString MainWindow::modeHint() const
     }
 }
 
+QString MainWindow::idleMetaText() const
+{
+    const QRect region = currentRegionRect();
+    return tr("%1 · %2×%3 · %4")
+        .arg(modeHint())
+        .arg(region.width())
+        .arg(region.height())
+        .arg(config_.data().container.toUpper());
+}
+
+QString MainWindow::recordingStatsText() const
+{
+    const QString path = session_.outputPath();
+    qint64 fileBytes = 0;
+    qint64 freeBytes = 0;
+    if (!path.isEmpty()) {
+        const QFileInfo info(path);
+        fileBytes = info.size();
+        const QStorageInfo storage(info.absolutePath());
+        if (storage.isValid()) {
+            freeBytes = storage.bytesAvailable();
+        }
+    } else {
+        const QStorageInfo storage(Config::resolvedOutputDirectory(config_.data()));
+        if (storage.isValid()) {
+            freeBytes = storage.bytesAvailable();
+        }
+    }
+    return tr("%1 / %2").arg(formatByteSize(fileBytes), formatByteSize(freeBytes));
+}
+
+void MainWindow::updateRecordingStats()
+{
+    if (!recordingStatsLabel_ || session_.state() == RecordingSession::State::Idle) {
+        return;
+    }
+    recordingStatsLabel_->setText(recordingStatsText());
+}
+
 void MainWindow::showEvent(QShowEvent* event)
 {
     QMainWindow::showEvent(event);
@@ -1147,6 +1396,75 @@ void MainWindow::closeEvent(QCloseEvent* event)
         trayIcon_->hide();
     }
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::registerHotkeys()
+{
+    const QString recordKey = config_.data().toggleRecord;
+    const QString pauseKey = config_.data().togglePause;
+    const QString captureKey = config_.data().captureStill;
+    const QString selectKey = config_.data().selectTarget;
+    const QVector<HotkeyAction> failed = hotkeys_.registerFrom(config_.data());
+    const bool remapped = recordKey != config_.data().toggleRecord
+        || pauseKey != config_.data().togglePause
+        || captureKey != config_.data().captureStill
+        || selectKey != config_.data().selectTarget;
+    if (remapped) {
+        saveConfig();
+    }
+    if (failed.isEmpty()) {
+        return;
+    }
+    QStringList names;
+    names.reserve(failed.size());
+    for (HotkeyAction action : failed) {
+        const QString sequence = hotkeySequenceFor(config_.data(), action);
+        names.append(sequence.isEmpty()
+                ? hotkeyActionName(action)
+                : tr("%1 (%2)").arg(hotkeyActionName(action), sequence));
+    }
+    QMessageBox::warning(
+        this,
+        tr("ORS"),
+        tr("無法註冊快捷鍵：%1\n可在設定中改成其他按鍵。").arg(names.join(QStringLiteral("、"))));
+}
+
+QString MainWindow::hotkeyActionName(HotkeyAction action) const
+{
+    switch (action) {
+    case HotkeyAction::ToggleRecord:
+        return tr("錄製開關");
+    case HotkeyAction::TogglePause:
+        return tr("暫停錄製");
+    case HotkeyAction::CaptureStill:
+        return tr("擷取畫面");
+    case HotkeyAction::SelectTarget:
+        return tr("選擇目標");
+    }
+    return {};
+}
+
+void MainWindow::onHotkey(HotkeyAction action)
+{
+    if (settingsOpen_) {
+        return;
+    }
+    switch (action) {
+    case HotkeyAction::ToggleRecord:
+        onRecord();
+        break;
+    case HotkeyAction::TogglePause:
+        onPauseToggle();
+        break;
+    case HotkeyAction::CaptureStill:
+        onCapture();
+        break;
+    case HotkeyAction::SelectTarget:
+        if (session_.state() == RecordingSession::State::Idle) {
+            startRegionSelection();
+        }
+        break;
+    }
 }
 
 } // namespace ors

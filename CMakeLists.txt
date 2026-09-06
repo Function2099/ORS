@@ -31,11 +31,15 @@ set(ORS_SOURCES
     src/ui/ToolbarIcons.h
     src/ui/SettingsDialog.cpp
     src/ui/SettingsDialog.h
+    src/ui/HotkeyRegistrar.cpp
+    src/ui/HotkeyRegistrar.h
     src/core/Config.cpp
     src/core/Config.h
     src/core/FilenameTemplate.cpp
     src/core/FilenameTemplate.h
     src/core/FrameQueue.h
+    src/core/WatermarkOverlay.cpp
+    src/core/WatermarkOverlay.h
     src/core/RecordingSession.cpp
     src/core/RecordingSession.h
     src/core/VideoFrame.h
@@ -46,6 +50,8 @@ set(ORS_SOURCES
     src/audio/AudioMix.h
     src/audio/AudioDevices.h
     src/mux/IMuxer.h
+    src/mux/GifEncoder.cpp
+    src/mux/GifEncoder.h
     src/encode/IEncoder.h
     src/encode/ColorConvert.h
     src/encode/MFEncoder.cpp
@@ -84,6 +90,8 @@ if(WIN32)
         user32
         gdi32
         strmiids
+        advapi32
+        powrprof
     )
 endif()
 
@@ -139,8 +147,15 @@ add_executable(ors_tests
     tests/test_color_convert.cpp
     tests/test_filename_template.cpp
     tests/test_audio_mix.cpp
+    tests/test_gif_encoder.cpp
+    tests/test_hotkey.cpp
+    tests/test_watermark_overlay.cpp
+    tests/test_clock.cpp
     src/core/Config.cpp
     src/core/FilenameTemplate.cpp
+    src/core/WatermarkOverlay.cpp
+    src/mux/GifEncoder.cpp
+    src/ui/HotkeyRegistrar.cpp
 )
 
 target_include_directories(ors_tests PRIVATE
@@ -150,6 +165,11 @@ target_include_directories(ors_tests PRIVATE
 target_link_libraries(ors_tests PRIVATE
     Catch2::Catch2
     Qt6::Core
+    Qt6::Gui
 )
+
+if(WIN32)
+    target_link_libraries(ors_tests PRIVATE user32)
+endif()
 
 add_test(NAME ors_tests COMMAND ors_tests)

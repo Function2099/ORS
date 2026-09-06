@@ -36,6 +36,30 @@ void paintStop(QPainter& p, const QRectF& box, const QColor& color)
     p.drawRoundedRect(box.adjusted(6.2, 6.2, -6.2, -6.2), 2.2, 2.2);
 }
 
+void paintPause(QPainter& p, const QRectF& box, const QColor& color)
+{
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    const qreal barW = 3.4;
+    const qreal gap = 3.2;
+    const qreal left = box.center().x() - gap / 2.0 - barW;
+    const QRectF bar(left, box.top() + 6.0, barW, box.height() - 12.0);
+    p.drawRoundedRect(bar, 1.1, 1.1);
+    p.drawRoundedRect(bar.translated(barW + gap, 0), 1.1, 1.1);
+}
+
+void paintResume(QPainter& p, const QRectF& box, const QColor& color)
+{
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    QPainterPath play;
+    play.moveTo(box.left() + 7.4, box.top() + 5.8);
+    play.lineTo(box.right() - 6.2, box.center().y());
+    play.lineTo(box.left() + 7.4, box.bottom() - 5.8);
+    play.closeSubpath();
+    p.drawPath(play);
+}
+
 void paintCapture(QPainter& p, const QRectF& box, const QColor& color)
 {
     const QRectF frame = box.adjusted(3.5, 4.5, -3.5, -4.5);
@@ -152,6 +176,12 @@ QIcon toolbarIcon(ToolbarGlyph glyph, int logicalSize, const QColor& color)
         break;
     case ToolbarGlyph::Stop:
         paintStop(painter, box, color);
+        break;
+    case ToolbarGlyph::Pause:
+        paintPause(painter, box, color);
+        break;
+    case ToolbarGlyph::Resume:
+        paintResume(painter, box, color);
         break;
     case ToolbarGlyph::Capture:
         paintCapture(painter, box, color);

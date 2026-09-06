@@ -40,6 +40,12 @@ struct ConfigData {
 
     QString toggleRecord{QStringLiteral("F9")};
     QString togglePause{QStringLiteral("F10")};
+    QString captureStill{QStringLiteral("F3")};
+    QString selectTarget{QStringLiteral("F4")};
+    bool toggleRecordEnabled{true};
+    bool togglePauseEnabled{true};
+    bool captureStillEnabled{true};
+    bool selectTargetEnabled{true};
 
     bool includeCursor{true};
     bool alwaysOnTop{false};
@@ -52,9 +58,30 @@ struct ConfigData {
     int keyframeInterval{5};
     QString resolutionAlign{QStringLiteral("8x4")};
     QString frameRateMode{QStringLiteral("vfr")};
+    int storageUpdateSeconds{5};
 
     bool captureIncludeCursor{true};
     QString captureImageFormat{QStringLiteral("png")};
+
+    bool gifIncludeCursor{true};
+    int gifFrameRate{10};
+
+    bool timeLimitEnabled{false};
+    int timeLimitMinutes{10};
+    int timeLimitSeconds{0};
+    QString timeLimitAction{QStringLiteral("none")};
+
+    bool watermarkEnabled{false};
+    QString watermarkImagePath;
+    int watermarkOpacity{100};
+    int watermarkX{10};
+    int watermarkY{10};
+    bool watermarkApplyToCapture{true};
+
+    bool useMultiCore{true};
+    int encoderThreads{0};
+    QString captureMode{QStringLiteral("dxgi")};
+    int pipelineLayers{3};
 };
 
 class Config {
@@ -65,6 +92,23 @@ public:
     static int gopFrameCount(const ConfigData& data);
     static void alignCaptureSize(const ConfigData& data, int& width, int& height);
     static QString normalizedCaptureImageFormat(const QString& format);
+    static QString containerExtension(const QString& container);
+    static constexpr int kMinFrameRate = 1;
+    static constexpr int kMaxFrameRate = 60;
+    static int normalizedFrameRate(int frameRate);
+    static int normalizedGifFrameRate(int frameRate);
+    static int normalizedStorageUpdateSeconds(int seconds);
+    static int normalizedTimeLimitMinutes(int minutes);
+    static int normalizedTimeLimitSeconds(int seconds);
+    static QString normalizedTimeLimitAction(const QString& action);
+    static int timeLimitDurationMs(const ConfigData& data);
+    static int normalizedWatermarkOpacity(int opacity);
+    static int normalizedWatermarkOffset(int value);
+    static int normalizedEncoderThreads(int threads);
+    static QString normalizedCaptureMode(const QString& mode);
+    static int normalizedPipelineLayers(int layers);
+    static int frameQueueCapacity(int pipelineLayers);
+    static int effectiveEncoderThreads(const ConfigData& data);
 
     bool load(const QString& path = {});
     bool save(const QString& path = {}) const;

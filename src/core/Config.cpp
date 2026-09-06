@@ -74,7 +74,7 @@ QString Config::resolvedOutputDirectory(const ConfigData& data)
 
 int Config::videoBitrateKbps(const ConfigData& data, int width, int height)
 {
-    const int fps = std::clamp(data.frameRate, 1, 120);
+    const int fps = normalizedFrameRate(data.frameRate);
     const int base = std::max(4000, std::max(1, width) * std::max(1, height) * fps / 8000);
     if (data.videoQuality == QLatin1String("custom")) {
         return std::clamp(data.customBitrateKbps, 500, 100000);
@@ -93,7 +93,7 @@ int Config::videoBitrateKbps(const ConfigData& data, int width, int height)
 
 int Config::gopFrameCount(const ConfigData& data)
 {
-    const int fps = std::clamp(data.frameRate, 1, 120);
+    const int fps = normalizedFrameRate(data.frameRate);
     const int seconds = std::clamp(data.keyframeInterval, 1, 30);
     return std::clamp(seconds * fps, 1, 3600);
 }
@@ -108,6 +108,116 @@ QString Config::normalizedCaptureImageFormat(const QString& format)
         return QStringLiteral("bmp");
     }
     return QStringLiteral("png");
+}
+
+QString Config::containerExtension(const QString& container)
+{
+    if (container.compare(QLatin1String("wmv"), Qt::CaseInsensitive) == 0) {
+        return QStringLiteral(".wmv");
+    }
+    if (container.compare(QLatin1String("gif"), Qt::CaseInsensitive) == 0) {
+        return QStringLiteral(".gif");
+    }
+    return QStringLiteral(".mp4");
+}
+
+int Config::normalizedFrameRate(int frameRate)
+{
+    return std::clamp(frameRate, kMinFrameRate, kMaxFrameRate);
+}
+
+int Config::normalizedGifFrameRate(int frameRate)
+{
+    return normalizedFrameRate(frameRate);
+}
+
+int Config::normalizedStorageUpdateSeconds(int seconds)
+{
+    return std::clamp(seconds, 1, 999);
+}
+
+int Config::normalizedTimeLimitMinutes(int minutes)
+{
+    return std::clamp(minutes, 0, 999);
+}
+
+int Config::normalizedTimeLimitSeconds(int seconds)
+{
+    return std::clamp(seconds, 0, 59);
+}
+
+QString Config::normalizedTimeLimitAction(const QString& action)
+{
+    const QString lower = action.trimmed().toLower();
+    if (lower == QLatin1String("restart") || lower == QLatin1String("quit")
+        || lower == QLatin1String("shutdown") || lower == QLatin1String("sleep")) {
+        return lower;
+    }
+    return QStringLiteral("none");
+}
+
+int Config::timeLimitDurationMs(const ConfigData& data)
+{
+    const int minutes = normalizedTimeLimitMinutes(data.timeLimitMinutes);
+    const int seconds = normalizedTimeLimitSeconds(data.timeLimitSeconds);
+    return std::max(1, minutes * 60 + seconds) * 1000;
+}
+
+int Config::normalizedWatermarkOpacity(int opacity)
+{
+    return std::clamp(opacity, 1, 100);
+}
+
+int Config::normalizedWatermarkOffset(int value)
+{
+    return std::clamp(value, -9999, 9999);
+}
+
+int Config::normalizedEncoderThreads(int threads)
+{
+    if (threads <= 0) {
+        return 0;
+    }
+    return std::clamp(threads, 1, 16);
+}
+
+QString Config::normalizedCaptureMode(const QString& mode)
+{
+    if (mode.trimmed().compare(QLatin1String("gdi"), Qt::CaseInsensitive) == 0) {
+        return QStringLiteral("gdi");
+    }
+    return QStringLiteral("dxgi");
+}
+
+int Config::normalizedPipelineLayers(int layers)
+{
+    if (layers <= 0) {
+        return 0;
+    }
+    if (layers == 2) {
+        return 2;
+    }
+    return 3;
+}
+
+int Config::frameQueueCapacity(int pipelineLayers)
+{
+    const int layers = normalizedPipelineLayers(pipelineLayers);
+    if (layers <= 0) {
+        return 1;
+    }
+    if (layers == 2) {
+        return 2;
+    }
+    return 4;
+}
+
+int Config::effectiveEncoderThreads(const ConfigData& data)
+{
+    if (!data.useMultiCore) {
+        return 1;
+    }
+    return normalizedEncoderThreads(data.encoderThreads);
 }
 
 void Config::alignCaptureSize(const ConfigData& data, int& width, int& height)
@@ -211,6 +321,12 @@ bool Config::load(const QString& path)
     const QJsonObject hotkeys = objectOrEmpty(root, "hotkeys");
     next.toggleRecord = readString(hotkeys, "toggleRecord", next.toggleRecord);
     next.togglePause = readString(hotkeys, "togglePause", next.togglePause);
+    next.captureStill = readString(hotkeys, "captureStill", next.captureStill);
+    next.selectTarget = readString(hotkeys, "selectTarget", next.selectTarget);
+    next.toggleRecordEnabled = readBool(hotkeys, "toggleRecordEnabled", next.toggleRecordEnabled);
+    next.togglePauseEnabled = readBool(hotkeys, "togglePauseEnabled", next.togglePauseEnabled);
+    next.captureStillEnabled = readBool(hotkeys, "captureStillEnabled", next.captureStillEnabled);
+    next.selectTargetEnabled = readBool(hotkeys, "selectTargetEnabled", next.selectTargetEnabled);
 
     const QJsonObject recording = objectOrEmpty(root, "recording");
     next.includeCursor = readBool(recording, "includeCursor", next.includeCursor);
@@ -218,7 +334,7 @@ bool Config::load(const QString& path)
     next.useTrayIcon = readBool(recording, "useTrayIcon", next.useTrayIcon);
     next.hideWhenMinimized = readBool(recording, "hideWhenMinimized", next.hideWhenMinimized);
     next.hideOnStartup = readBool(recording, "hideOnStartup", next.hideOnStartup);
-    next.frameRate = std::clamp(readInt(recording, "frameRate", next.frameRate), 1, 120);
+    next.frameRate = normalizedFrameRate(readInt(recording, "frameRate", next.frameRate));
     next.videoQuality = readString(recording, "quality", next.videoQuality);
     next.customBitrateKbps = std::clamp(
         readInt(recording, "customBitrateKbps", next.customBitrateKbps), 500, 100000);
@@ -226,11 +342,45 @@ bool Config::load(const QString& path)
         readInt(recording, "keyframeInterval", next.keyframeInterval), 1, 30);
     next.resolutionAlign = readString(recording, "resolutionAlign", next.resolutionAlign);
     next.frameRateMode = readString(recording, "frameRateMode", next.frameRateMode);
+    next.storageUpdateSeconds = normalizedStorageUpdateSeconds(
+        readInt(recording, "storageUpdateSeconds", next.storageUpdateSeconds));
 
     const QJsonObject capture = objectOrEmpty(root, "capture");
     next.captureIncludeCursor = readBool(capture, "includeCursor", next.captureIncludeCursor);
     next.captureImageFormat = normalizedCaptureImageFormat(
         readString(capture, "imageFormat", next.captureImageFormat));
+
+    const QJsonObject gif = objectOrEmpty(root, "gif");
+    next.gifIncludeCursor = readBool(gif, "includeCursor", next.gifIncludeCursor);
+    next.gifFrameRate = normalizedGifFrameRate(readInt(gif, "frameRate", next.gifFrameRate));
+
+    const QJsonObject timeLimit = objectOrEmpty(root, "timeLimit");
+    next.timeLimitEnabled = readBool(timeLimit, "enabled", next.timeLimitEnabled);
+    next.timeLimitMinutes = normalizedTimeLimitMinutes(
+        readInt(timeLimit, "minutes", next.timeLimitMinutes));
+    next.timeLimitSeconds = normalizedTimeLimitSeconds(
+        readInt(timeLimit, "seconds", next.timeLimitSeconds));
+    next.timeLimitAction = normalizedTimeLimitAction(
+        readString(timeLimit, "action", next.timeLimitAction));
+
+    const QJsonObject watermark = objectOrEmpty(root, "watermark");
+    next.watermarkEnabled = readBool(watermark, "enabled", next.watermarkEnabled);
+    next.watermarkImagePath = readString(watermark, "imagePath", next.watermarkImagePath);
+    next.watermarkOpacity = normalizedWatermarkOpacity(
+        readInt(watermark, "opacity", next.watermarkOpacity));
+    next.watermarkX = normalizedWatermarkOffset(readInt(watermark, "x", next.watermarkX));
+    next.watermarkY = normalizedWatermarkOffset(readInt(watermark, "y", next.watermarkY));
+    next.watermarkApplyToCapture = readBool(
+        watermark, "applyToCapture", next.watermarkApplyToCapture);
+
+    const QJsonObject performance = objectOrEmpty(root, "performance");
+    next.useMultiCore = readBool(performance, "useMultiCore", next.useMultiCore);
+    next.encoderThreads = normalizedEncoderThreads(
+        readInt(performance, "encoderThreads", next.encoderThreads));
+    next.captureMode = normalizedCaptureMode(
+        readString(performance, "captureMode", next.captureMode));
+    next.pipelineLayers = normalizedPipelineLayers(
+        readInt(performance, "pipelineLayers", next.pipelineLayers));
 
     data_ = std::move(next);
     return true;
@@ -284,6 +434,12 @@ bool Config::save(const QString& path) const
     QJsonObject hotkeys;
     hotkeys.insert(QStringLiteral("toggleRecord"), data_.toggleRecord);
     hotkeys.insert(QStringLiteral("togglePause"), data_.togglePause);
+    hotkeys.insert(QStringLiteral("captureStill"), data_.captureStill);
+    hotkeys.insert(QStringLiteral("selectTarget"), data_.selectTarget);
+    hotkeys.insert(QStringLiteral("toggleRecordEnabled"), data_.toggleRecordEnabled);
+    hotkeys.insert(QStringLiteral("togglePauseEnabled"), data_.togglePauseEnabled);
+    hotkeys.insert(QStringLiteral("captureStillEnabled"), data_.captureStillEnabled);
+    hotkeys.insert(QStringLiteral("selectTargetEnabled"), data_.selectTargetEnabled);
 
     QJsonObject recording;
     recording.insert(QStringLiteral("includeCursor"), data_.includeCursor);
@@ -291,16 +447,43 @@ bool Config::save(const QString& path) const
     recording.insert(QStringLiteral("useTrayIcon"), data_.useTrayIcon);
     recording.insert(QStringLiteral("hideWhenMinimized"), data_.hideWhenMinimized);
     recording.insert(QStringLiteral("hideOnStartup"), data_.hideOnStartup);
-    recording.insert(QStringLiteral("frameRate"), data_.frameRate);
+    recording.insert(QStringLiteral("frameRate"), normalizedFrameRate(data_.frameRate));
     recording.insert(QStringLiteral("quality"), data_.videoQuality);
     recording.insert(QStringLiteral("customBitrateKbps"), data_.customBitrateKbps);
     recording.insert(QStringLiteral("keyframeInterval"), data_.keyframeInterval);
     recording.insert(QStringLiteral("resolutionAlign"), data_.resolutionAlign);
     recording.insert(QStringLiteral("frameRateMode"), data_.frameRateMode);
+    recording.insert(
+        QStringLiteral("storageUpdateSeconds"),
+        normalizedStorageUpdateSeconds(data_.storageUpdateSeconds));
 
     QJsonObject capture;
     capture.insert(QStringLiteral("includeCursor"), data_.captureIncludeCursor);
     capture.insert(QStringLiteral("imageFormat"), normalizedCaptureImageFormat(data_.captureImageFormat));
+
+    QJsonObject gif;
+    gif.insert(QStringLiteral("includeCursor"), data_.gifIncludeCursor);
+    gif.insert(QStringLiteral("frameRate"), normalizedGifFrameRate(data_.gifFrameRate));
+
+    QJsonObject timeLimit;
+    timeLimit.insert(QStringLiteral("enabled"), data_.timeLimitEnabled);
+    timeLimit.insert(QStringLiteral("minutes"), normalizedTimeLimitMinutes(data_.timeLimitMinutes));
+    timeLimit.insert(QStringLiteral("seconds"), normalizedTimeLimitSeconds(data_.timeLimitSeconds));
+    timeLimit.insert(QStringLiteral("action"), normalizedTimeLimitAction(data_.timeLimitAction));
+
+    QJsonObject watermark;
+    watermark.insert(QStringLiteral("enabled"), data_.watermarkEnabled);
+    watermark.insert(QStringLiteral("imagePath"), data_.watermarkImagePath);
+    watermark.insert(QStringLiteral("opacity"), normalizedWatermarkOpacity(data_.watermarkOpacity));
+    watermark.insert(QStringLiteral("x"), normalizedWatermarkOffset(data_.watermarkX));
+    watermark.insert(QStringLiteral("y"), normalizedWatermarkOffset(data_.watermarkY));
+    watermark.insert(QStringLiteral("applyToCapture"), data_.watermarkApplyToCapture);
+
+    QJsonObject performance;
+    performance.insert(QStringLiteral("useMultiCore"), data_.useMultiCore);
+    performance.insert(QStringLiteral("encoderThreads"), normalizedEncoderThreads(data_.encoderThreads));
+    performance.insert(QStringLiteral("captureMode"), normalizedCaptureMode(data_.captureMode));
+    performance.insert(QStringLiteral("pipelineLayers"), normalizedPipelineLayers(data_.pipelineLayers));
 
     QJsonObject root;
     root.insert(QStringLiteral("version"), data_.version);
@@ -312,6 +495,10 @@ bool Config::save(const QString& path) const
     root.insert(QStringLiteral("hotkeys"), hotkeys);
     root.insert(QStringLiteral("recording"), recording);
     root.insert(QStringLiteral("capture"), capture);
+    root.insert(QStringLiteral("gif"), gif);
+    root.insert(QStringLiteral("timeLimit"), timeLimit);
+    root.insert(QStringLiteral("watermark"), watermark);
+    root.insert(QStringLiteral("performance"), performance);
 
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

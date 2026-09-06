@@ -2,6 +2,7 @@
 
 #include "core/VideoFrame.h"
 
+#include <QString>
 #include <QtGlobal>
 
 namespace ors {
@@ -23,6 +24,7 @@ struct CaptureSettings {
     quintptr windowHandle{0};
     bool includeCursor{true};
     bool variableFrameRate{false};
+    QString captureMode{QStringLiteral("dxgi")};
 };
 
 enum class GrabResult {

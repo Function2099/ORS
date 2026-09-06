@@ -1,4 +1,5 @@
 #include "core/FrameQueue.h"
+#include "core/Clock.h"
 #include "core/VideoFrame.h"
 
 #include <chrono>
@@ -70,4 +71,12 @@ TEST_CASE("FrameQueue clear empties without resetting dropped count")
     queue.clear();
     REQUIRE(queue.size() == 0);
     REQUIRE(queue.dropped() == 1);
+}
+
+TEST_CASE("sampleDurationNs uses the gap to the next frame")
+{
+    constexpr std::int64_t fallback = 16'666'667;
+    REQUIRE(ors::sampleDurationNs(0, 50'000'000, fallback) == 50'000'000);
+    REQUIRE(ors::sampleDurationNs(10'000'000, 10'500'000, fallback) == fallback);
+    REQUIRE(ors::sampleDurationNs(20'000'000, 10'000'000, fallback) == fallback);
 }

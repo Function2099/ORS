@@ -2,6 +2,7 @@
 
 #include "audio/IAudioCapture.h"
 #include "capture/ICapture.h"
+#include "core/WatermarkOverlay.h"
 #include "encode/IEncoder.h"
 
 #include <QObject>
@@ -19,6 +20,9 @@ struct RecordingRequest {
     QString filenamePrefix{QStringLiteral("錄製")};
     int filenameStartNumber{1};
     QString container{QStringLiteral("mp4")};
+    int pipelineLayers{3};
+    int encoderThreads{0};
+    WatermarkSettings watermark;
 };
 
 class RecordingSession : public QObject {
@@ -42,6 +46,7 @@ public:
     void pause();
     void resume();
     void stop();
+    bool snapshotFrame(VideoFrame& out);
 
     Q_INVOKABLE void onWorkerDone(const QString& path, const QString& error);
 
