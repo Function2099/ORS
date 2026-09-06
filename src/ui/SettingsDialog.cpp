@@ -1090,7 +1090,7 @@ QWidget* SettingsDialog::createGifPage()
     auto* gifCard = new QWidget(page);
     gifCard->setObjectName(QStringLiteral("videoCard"));
     gifFrameRateSpin_ = new QSpinBox(gifCard);
-    gifFrameRateSpin_->setRange(Config::kMinFrameRate, Config::kMaxFrameRate);
+    gifFrameRateSpin_->setRange(Config::kMinFrameRate, Config::kMaxGifFrameRate);
     gifFrameRateSpin_->setMinimumWidth(72);
 
     auto addRow = [](QGridLayout* grid, int row, QWidget* label, QWidget* field) {

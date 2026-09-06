@@ -33,4 +33,13 @@ inline std::int64_t monotonicTimestampNs(
     return nextNs > previousNs ? nextNs : previousNs + minDelta;
 }
 
+// Subtract accumulated pause time so the mux timeline skips pauses.
+inline std::int64_t adjustPausedTimestampNs(std::int64_t timestampNs, std::int64_t pauseOffsetNs)
+{
+    if (pauseOffsetNs <= 0) {
+        return timestampNs;
+    }
+    return timestampNs > pauseOffsetNs ? timestampNs - pauseOffsetNs : 0;
+}
+
 } // namespace ors

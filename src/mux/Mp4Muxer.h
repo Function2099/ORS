@@ -17,6 +17,8 @@ public:
     bool finalize() override;
 
     QString lastError() const override;
+    PixelFormat videoInputFormat() const override;
+    bool hardwareVideoEncoder() const override;
 
 private:
     struct Impl;

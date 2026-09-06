@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -88,6 +89,19 @@ struct AudioCaptureWin::Impl {
     ComPtr<IAudioClient> client;
     ComPtr<IAudioCaptureClient> capture;
     std::unique_ptr<WAVEFORMATEX, WaveFormatDeleter> mixFormat;
+    HANDLE event{nullptr};
+    bool useEvent{false};
+    bool haveQpcOffset{false};
+    std::int64_t qpcOffsetNs{0};
+
+    void closeEventHandle()
+    {
+        if (event) {
+            CloseHandle(event);
+            event = nullptr;
+        }
+        useEvent = false;
+    }
 
     void reset()
     {
@@ -98,6 +112,9 @@ struct AudioCaptureWin::Impl {
         client.Reset();
         device.Reset();
         mixFormat.reset();
+        closeEventHandle();
+        haveQpcOffset = false;
+        qpcOffsetNs = 0;
     }
 };
 
@@ -184,17 +201,60 @@ bool AudioCaptureWin::start(const AudioCaptureSettings& settings)
         flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
     }
     constexpr REFERENCE_TIME kBuffer100ns = 2000000; // 200 ms
+    impl_->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    DWORD initFlags = flags;
+    if (impl_->event) {
+        initFlags |= AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+    }
     hr = impl_->client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
-        flags,
+        initFlags,
         kBuffer100ns,
         0,
         impl_->mixFormat.get(),
         nullptr);
+    if (FAILED(hr) && impl_->event) {
+        impl_->closeEventHandle();
+        impl_->client.Reset();
+        hr = impl_->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &impl_->client);
+        if (SUCCEEDED(hr)) {
+            hr = impl_->client->Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                flags,
+                kBuffer100ns,
+                0,
+                impl_->mixFormat.get(),
+                nullptr);
+        }
+    }
     if (FAILED(hr)) {
         impl_->lastError = QStringLiteral("無法初始化 WASAPI (%1)").arg(hrHex(hr));
         impl_->reset();
         return false;
+    }
+    if (impl_->event) {
+        hr = impl_->client->SetEventHandle(impl_->event);
+        if (SUCCEEDED(hr)) {
+            impl_->useEvent = true;
+        } else {
+            impl_->closeEventHandle();
+            impl_->client.Reset();
+            hr = impl_->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &impl_->client);
+            if (SUCCEEDED(hr)) {
+                hr = impl_->client->Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    flags,
+                    kBuffer100ns,
+                    0,
+                    impl_->mixFormat.get(),
+                    nullptr);
+            }
+            if (FAILED(hr)) {
+                impl_->lastError = QStringLiteral("無法初始化 WASAPI (%1)").arg(hrHex(hr));
+                impl_->reset();
+                return false;
+            }
+        }
     }
 
     hr = impl_->client->GetService(IID_PPV_ARGS(&impl_->capture));
@@ -220,7 +280,7 @@ void AudioCaptureWin::stop()
 
 bool AudioCaptureWin::grab(AudioFrame& out)
 {
-    return grab(out, 200);
+    return grab(out, 16);
 }
 
 bool AudioCaptureWin::grab(AudioFrame& out, int waitMs)
@@ -229,7 +289,7 @@ bool AudioCaptureWin::grab(AudioFrame& out, int waitMs)
         return false;
     }
 
-    const int attempts = waitMs <= 0 ? 1 : std::max(1, waitMs / 5);
+    const int attempts = waitMs <= 0 ? 1 : (impl_->useEvent ? 2 : std::max(1, waitMs / 5));
     for (int attempt = 0; attempt < attempts; ++attempt) {
         UINT32 packet = 0;
         HRESULT hr = impl_->capture->GetNextPacketSize(&packet);
@@ -241,6 +301,13 @@ bool AudioCaptureWin::grab(AudioFrame& out, int waitMs)
             if (waitMs <= 0) {
                 break;
             }
+            if (impl_->useEvent && impl_->event) {
+                const DWORD wr = WaitForSingleObject(impl_->event, static_cast<DWORD>(waitMs));
+                if (wr != WAIT_OBJECT_0) {
+                    break;
+                }
+                continue;
+            }
             Sleep(5);
             continue;
         }
@@ -248,7 +315,8 @@ bool AudioCaptureWin::grab(AudioFrame& out, int waitMs)
         BYTE* data = nullptr;
         UINT32 frames = 0;
         DWORD flags = 0;
-        hr = impl_->capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+        UINT64 qpc = 0;
+        hr = impl_->capture->GetBuffer(&data, &frames, &flags, nullptr, &qpc);
         if (FAILED(hr)) {
             impl_->lastError = QStringLiteral("讀取音訊緩衝失敗 (%1)").arg(hrHex(hr));
             return false;
@@ -265,7 +333,16 @@ bool AudioCaptureWin::grab(AudioFrame& out, int waitMs)
             out.bytes);
         impl_->capture->ReleaseBuffer(frames);
 
-        out.timestampNs = nowNs();
+        if (qpc != 0) {
+            const std::int64_t packetNs = static_cast<std::int64_t>(qpc) * 100;
+            if (!impl_->haveQpcOffset) {
+                impl_->qpcOffsetNs = nowNs() - packetNs;
+                impl_->haveQpcOffset = true;
+            }
+            out.timestampNs = packetNs + impl_->qpcOffsetNs;
+        } else {
+            out.timestampNs = nowNs();
+        }
         out.sampleRate = impl_->sampleRate;
         out.channels = 2;
         out.bitsPerSample = 16;

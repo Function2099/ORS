@@ -10,7 +10,8 @@
 
 namespace ors {
 
-// Bounded queue: when full, the oldest item is dropped.
+// Bounded queue. Video uses push() (drop-oldest when full). Audio uses
+// pushWait() so PCM is never dropped; wake() unblocks waiters on stop.
 template <typename T>
 class FrameQueue {
 public:
@@ -31,6 +32,19 @@ public:
         cv_.notify_one();
     }
 
+    // Blocks while full instead of dropping. Returns false if wake() was called.
+    bool pushWait(T frame)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return queue_.size() < capacity_ || stopping_; });
+        if (stopping_) {
+            return false;
+        }
+        queue_.push_back(std::move(frame));
+        cv_.notify_one();
+        return true;
+    }
+
     bool pop(T& out)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -39,6 +53,7 @@ public:
         }
         out = std::move(queue_.front());
         queue_.pop_front();
+        cv_.notify_one();
         return true;
     }
 
@@ -53,6 +68,7 @@ public:
         }
         out = std::move(queue_.front());
         queue_.pop_front();
+        cv_.notify_one();
         return true;
     }
 

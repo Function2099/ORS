@@ -53,7 +53,7 @@ struct ConfigData {
     bool hideWhenMinimized{false};
     bool hideOnStartup{false};
     int frameRate{60};
-    QString videoQuality{QStringLiteral("very-high")};
+    QString videoQuality{QStringLiteral("high")};
     int customBitrateKbps{12000};
     int keyframeInterval{5};
     QString resolutionAlign{QStringLiteral("8x4")};
@@ -94,7 +94,8 @@ public:
     static QString normalizedCaptureImageFormat(const QString& format);
     static QString containerExtension(const QString& container);
     static constexpr int kMinFrameRate = 1;
-    static constexpr int kMaxFrameRate = 60;
+    static constexpr int kMaxFrameRate = 240;
+    static constexpr int kMaxGifFrameRate = 60;
     static int normalizedFrameRate(int frameRate);
     static int normalizedGifFrameRate(int frameRate);
     static int normalizedStorageUpdateSeconds(int seconds);

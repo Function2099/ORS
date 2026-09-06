@@ -5,6 +5,7 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mftransform.h>
 #include <codecapi.h>
 #include <oaidl.h>
 #include <strmif.h>
@@ -13,6 +14,8 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+
+#include <QString>
 
 using Microsoft::WRL::ComPtr;
 
@@ -70,6 +73,44 @@ HRESULT createSample(
     return S_OK;
 }
 
+void setCodecUi4(ICodecAPI* codec, const GUID& key, ULONG value)
+{
+    if (!codec) {
+        return;
+    }
+    VARIANT variant{};
+    variant.vt = VT_UI4;
+    variant.ulVal = value;
+    codec->SetValue(&key, &variant);
+}
+
+void setCodecBool(ICodecAPI* codec, const GUID& key, bool enabled)
+{
+    if (!codec) {
+        return;
+    }
+    VARIANT variant{};
+    variant.vt = VT_BOOL;
+    variant.boolVal = enabled ? VARIANT_TRUE : VARIANT_FALSE;
+    if (FAILED(codec->SetValue(&key, &variant))) {
+        setCodecUi4(codec, key, enabled ? 1 : 0);
+    }
+}
+
+bool nameLooksLikeSoftwareH264(const QString& name)
+{
+    const QString lower = name.toLower();
+    if (lower.contains(QLatin1String("nvidia")) || lower.contains(QLatin1String("nvenc"))
+        || lower.contains(QLatin1String("intel")) || lower.contains(QLatin1String("quick sync"))
+        || lower.contains(QLatin1String("qsv")) || lower.contains(QLatin1String("amd"))
+        || lower.contains(QLatin1String("amf")) || lower.contains(QLatin1String("hardware"))) {
+        return false;
+    }
+    return lower.contains(QLatin1String("microsoft"))
+        || lower.contains(QLatin1String("h264 encoder mft"))
+        || lower.contains(QLatin1String("h.264 encoder mft"));
+}
+
 } // namespace
 
 struct Mp4Muxer::Impl {
@@ -81,6 +122,8 @@ struct Mp4Muxer::Impl {
     bool hasAudio{false};
     bool writing{false};
     bool hasBase{false};
+    PixelFormat videoInput{PixelFormat::BGRA8};
+    bool hardwareVideo{true};
     std::int64_t baseNs{0};
 
     std::int64_t relativeNs(std::int64_t timestampNs)
@@ -98,6 +141,8 @@ struct Mp4Muxer::Impl {
         writing = false;
         hasBase = false;
         hasAudio = false;
+        videoInput = PixelFormat::BGRA8;
+        hardwareVideo = true;
         lastError.clear();
     }
 };
@@ -128,19 +173,21 @@ bool Mp4Muxer::open(const MuxerOpenParams& params)
     }
 
     ComPtr<IMFAttributes> attribs;
-    HRESULT hr = MFCreateAttributes(&attribs, 4);
+    HRESULT hr = MFCreateAttributes(&attribs, 5);
     if (FAILED(hr)) {
         impl_->lastError = QStringLiteral("無法建立 Media Foundation 屬性 (%1)").arg(hrHex(hr));
         return false;
     }
     attribs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     attribs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+    attribs->SetUINT32(MF_LOW_LATENCY, TRUE);
     attribs->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
 
     const std::wstring path = params.filePath.toStdWString();
     hr = MFCreateSinkWriterFromURL(path.c_str(), nullptr, attribs.Get(), &impl_->writer);
     if (FAILED(hr)) {
         attribs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, FALSE);
+        impl_->hardwareVideo = false;
         hr = MFCreateSinkWriterFromURL(path.c_str(), nullptr, attribs.Get(), &impl_->writer);
     }
     if (FAILED(hr)) {
@@ -184,44 +231,86 @@ bool Mp4Muxer::open(const MuxerOpenParams& params)
         impl_->reset();
         return false;
     }
-    videoIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    videoIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-    videoIn->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    videoIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-    videoIn->SetUINT32(MF_MT_FIXED_SIZE_SAMPLES, TRUE);
-    videoIn->SetUINT32(MF_MT_SAMPLE_SIZE, width * height * 4);
-    videoIn->SetUINT32(MF_MT_DEFAULT_STRIDE, width * 4);
-    setFrameSize(videoIn.Get(), width, height);
-    setFrameRate(videoIn.Get(), fps);
-    MFSetAttributeRatio(videoIn.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    hr = impl_->writer->SetInputMediaType(impl_->videoStream, videoIn.Get(), nullptr);
-    if (FAILED(hr)) {
-        impl_->lastError = QStringLiteral("無法設定 RGB32 輸入 (%1)").arg(hrHex(hr));
-        impl_->reset();
-        return false;
-    }
 
-    if (params.keyframeGopFrames > 0) {
-        ComPtr<ICodecAPI> codec;
-        if (SUCCEEDED(impl_->writer->GetServiceForStream(
-                impl_->videoStream, GUID_NULL, IID_PPV_ARGS(&codec)))
-            && codec) {
-            VARIANT value{};
-            value.vt = VT_UI4;
-            value.ulVal = static_cast<ULONG>(params.keyframeGopFrames);
-            codec->SetValue(&CODECAPI_AVEncMPVGOPSize, &value);
+    auto fillVideoIn = [&](GUID subtype, UINT32 sampleSize, INT32 stride) {
+        videoIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        videoIn->SetGUID(MF_MT_SUBTYPE, subtype);
+        videoIn->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        videoIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+        videoIn->SetUINT32(MF_MT_FIXED_SIZE_SAMPLES, TRUE);
+        videoIn->SetUINT32(MF_MT_SAMPLE_SIZE, sampleSize);
+        videoIn->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(stride));
+        setFrameSize(videoIn.Get(), width, height);
+        setFrameRate(videoIn.Get(), fps);
+        MFSetAttributeRatio(videoIn.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    };
+
+    impl_->videoInput = PixelFormat::BGRA8;
+    if (params.preferNv12) {
+        fillVideoIn(MFVideoFormat_NV12, width * height * 3 / 2, static_cast<INT32>(width));
+        hr = impl_->writer->SetInputMediaType(impl_->videoStream, videoIn.Get(), nullptr);
+        if (SUCCEEDED(hr)) {
+            impl_->videoInput = PixelFormat::NV12;
         }
     }
+    if (impl_->videoInput != PixelFormat::NV12) {
+        videoIn.Reset();
+        hr = MFCreateMediaType(&videoIn);
+        if (FAILED(hr)) {
+            impl_->reset();
+            return false;
+        }
+        fillVideoIn(MFVideoFormat_RGB32, width * height * 4, static_cast<INT32>(width * 4));
+        hr = impl_->writer->SetInputMediaType(impl_->videoStream, videoIn.Get(), nullptr);
+        if (FAILED(hr)) {
+            impl_->lastError = QStringLiteral("無法設定視訊輸入 (%1)").arg(hrHex(hr));
+            impl_->reset();
+            return false;
+        }
+        impl_->videoInput = PixelFormat::BGRA8;
+    }
 
-    if (params.encoderThreads > 0) {
-        ComPtr<ICodecAPI> codec;
-        if (SUCCEEDED(impl_->writer->GetServiceForStream(
-                impl_->videoStream, GUID_NULL, IID_PPV_ARGS(&codec)))
-            && codec) {
-            VARIANT value{};
-            value.vt = VT_UI4;
-            value.ulVal = static_cast<ULONG>(params.encoderThreads);
-            codec->SetValue(&CODECAPI_AVEncNumWorkerThreads, &value);
+    ComPtr<ICodecAPI> codec;
+    if (SUCCEEDED(impl_->writer->GetServiceForStream(
+            impl_->videoStream, GUID_NULL, IID_PPV_ARGS(&codec)))
+        && codec) {
+        if (params.keyframeGopFrames > 0) {
+            setCodecUi4(codec.Get(), CODECAPI_AVEncMPVGOPSize, static_cast<ULONG>(params.keyframeGopFrames));
+        }
+        if (params.encoderThreads > 0) {
+            setCodecUi4(
+                codec.Get(),
+                CODECAPI_AVEncNumWorkerThreads,
+                static_cast<ULONG>(params.encoderThreads));
+        }
+        setCodecBool(codec.Get(), CODECAPI_AVLowLatencyMode, true);
+        setCodecUi4(codec.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+    }
+
+    ComPtr<IMFTransform> transform;
+    if (SUCCEEDED(impl_->writer->GetServiceForStream(
+            impl_->videoStream, GUID_NULL, IID_PPV_ARGS(&transform)))
+        && transform) {
+        ComPtr<IMFAttributes> transformAttrs;
+        if (SUCCEEDED(transform->GetAttributes(&transformAttrs)) && transformAttrs) {
+            UINT32 nameLen = 0;
+            if (SUCCEEDED(transformAttrs->GetStringLength(MFT_FRIENDLY_NAME_Attribute, &nameLen))
+                && nameLen > 0) {
+                std::wstring name(static_cast<std::size_t>(nameLen) + 1, L'\0');
+                if (SUCCEEDED(transformAttrs->GetString(
+                        MFT_FRIENDLY_NAME_Attribute, name.data(), nameLen + 1, &nameLen))) {
+                    name.resize(nameLen);
+                    if (nameLooksLikeSoftwareH264(QString::fromWCharArray(name.c_str()))) {
+                        impl_->hardwareVideo = false;
+                    }
+                }
+            }
+            UINT32 hardwareUrlLen = 0;
+            if (SUCCEEDED(transformAttrs->GetStringLength(
+                    MFT_ENUM_HARDWARE_URL_Attribute, &hardwareUrlLen))
+                && hardwareUrlLen > 0) {
+                impl_->hardwareVideo = true;
+            }
         }
     }
 
@@ -327,6 +416,16 @@ bool Mp4Muxer::finalize()
     }
     impl_->reset();
     return ok;
+}
+
+PixelFormat Mp4Muxer::videoInputFormat() const
+{
+    return impl_->videoInput;
+}
+
+bool Mp4Muxer::hardwareVideoEncoder() const
+{
+    return impl_->hardwareVideo;
 }
 
 } // namespace ors

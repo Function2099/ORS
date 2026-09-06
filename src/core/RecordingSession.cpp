@@ -168,6 +168,9 @@ public:
             });
             if (!audioReady_) {
                 wantAudio_ = false;
+                if (audioWarning.isEmpty()) {
+                    audioWarning = QStringLiteral("無法擷取音訊，改為僅錄製畫面");
+                }
             }
         }
 
@@ -222,8 +225,24 @@ public:
 
     void setPaused(bool paused)
     {
-        paused_.store(paused);
+        const bool was = paused_.exchange(paused);
+        if (paused == was) {
+            return;
+        }
+        if (paused) {
+            pauseStartedNs_.store(nowNs());
+            return;
+        }
+        const std::int64_t started = pauseStartedNs_.exchange(0);
+        if (started > 0) {
+            const std::int64_t extra = nowNs() - started;
+            if (extra > 0) {
+                pauseOffsetNs_.fetch_add(extra);
+            }
+        }
     }
+
+    std::uint64_t dropped() const { return videoQueue_.dropped(); }
 
     void joinWorkers()
     {
@@ -241,6 +260,9 @@ public:
 
     QString outputPath;
     QString error;
+    QString audioWarning;
+    QString captureWarning;
+    QString encoderWarning;
 
 private:
     void shutdownMf()
@@ -272,6 +294,9 @@ private:
 
         request_.encoder.width = capture_->width();
         request_.encoder.height = capture_->height();
+        if (capture_->softwareFallback()) {
+            captureWarning = QStringLiteral("畫面擷取已改用 GDI，效能可能較低");
+        }
         {
             std::lock_guard lock(mutex_);
             captureReady_ = true;
@@ -280,7 +305,9 @@ private:
 
         VideoFrame frame;
         while (!stop_.load()) {
-            const GrabResult grabbed = capture_->grab(frame);
+            const bool snapshot = snapshotRequested_.load();
+            const bool copyPixels = !paused_.load() || snapshot;
+            const GrabResult grabbed = capture_->grab(frame, copyPixels, snapshot);
             if (grabbed == GrabResult::Failed) {
                 if (!stop_.load()) {
                     fail(capture_->lastError().isEmpty()
@@ -296,6 +323,8 @@ private:
             fulfillSnapshot(frame);
             if (!paused_.load()) {
                 watermark_.apply(frame);
+                frame.timestampNs = adjustPausedTimestampNs(
+                    frame.timestampNs, pauseOffsetNs_.load(std::memory_order_relaxed));
                 videoQueue_.push(std::move(frame));
             }
         }
@@ -330,6 +359,9 @@ private:
             AudioCaptureSettings systemSettings;
             systemSettings.systemAudio = true;
             if (!systemAudio_->start(systemSettings)) {
+                audioWarning = systemAudio_->lastError().isEmpty()
+                    ? QStringLiteral("無法擷取系統音訊")
+                    : systemAudio_->lastError();
                 systemAudio_.reset();
             }
         }
@@ -339,6 +371,11 @@ private:
             micSettings.microphoneId = request_.audio.microphoneId;
             micSettings.inputSource = request_.audio.inputSource;
             if (!micAudio_->start(micSettings)) {
+                const QString micError = micAudio_->lastError().isEmpty()
+                    ? QStringLiteral("無法擷取麥克風")
+                    : micAudio_->lastError();
+                audioWarning = audioWarning.isEmpty() ? micError
+                    : audioWarning + QStringLiteral("；") + micError;
                 micAudio_.reset();
             }
         }
@@ -359,7 +396,7 @@ private:
         AudioFrame frame;
         while (!stop_.load()) {
             if (systemAudio_ && micAudio_) {
-                if (!systemAudio_->grab(frame, 200)) {
+                if (!systemAudio_->grab(frame, 16)) {
                     systemAudio_.reset();
                     continue;
                 }
@@ -368,12 +405,14 @@ private:
                     static_cast<std::size_t>(std::max(1, outRate / 10)); // ~100 ms
                 trimStereoFifo(micFifo, maxFrames);
                 if (!paused_.load() && !frame.bytes.empty()) {
+                    frame.timestampNs = adjustPausedTimestampNs(
+                        frame.timestampNs, pauseOffsetNs_.load(std::memory_order_relaxed));
                     const std::size_t frames = frame.bytes.size() / (2 * sizeof(std::int16_t));
                     mixStereoS16FromFifo(
                         reinterpret_cast<std::int16_t*>(frame.bytes.data()),
                         frames,
                         micFifo);
-                    audioQueue_.push(std::move(frame));
+                    audioQueue_.pushWait(std::move(frame));
                 }
                 continue;
             }
@@ -382,7 +421,7 @@ private:
             if (!source) {
                 break;
             }
-            if (!source->grab(frame, 200)) {
+            if (!source->grab(frame, 16)) {
                 if (source == systemAudio_.get()) {
                     systemAudio_.reset();
                 } else {
@@ -402,7 +441,9 @@ private:
                     }
                     frame.sampleRate = outRate;
                 }
-                audioQueue_.push(std::move(frame));
+                frame.timestampNs = adjustPausedTimestampNs(
+                    frame.timestampNs, pauseOffsetNs_.load(std::memory_order_relaxed));
+                audioQueue_.pushWait(std::move(frame));
             }
         }
         if (systemAudio_) {
@@ -444,6 +485,8 @@ private:
         if (encoderSettings.frameRate <= 0) {
             encoderSettings.frameRate = request_.capture.frameRate > 0 ? request_.capture.frameRate : 30;
         }
+        const bool gif = isGifContainer(request_.container);
+        encoderSettings.outputFormat = gif ? PixelFormat::BGRA8 : PixelFormat::NV12;
         if (!encoder_->open(encoderSettings)) {
             fail(QStringLiteral("無法開啟編碼器"));
             notifySessionDone();
@@ -461,11 +504,20 @@ private:
         muxParams.hasAudio = wantAudio_ && audioReady_;
         muxParams.audioSampleRate = request_.audio.sampleRate;
         muxParams.audioChannels = 2;
+        muxParams.preferNv12 = !gif;
         if (!muxer_->open(muxParams)) {
             fail(muxer_->lastError().isEmpty() ? QStringLiteral("無法建立輸出檔案") : muxer_->lastError());
             encoder_->close();
             notifySessionDone();
             return;
+        }
+        if (!gif && muxer_->videoInputFormat() != PixelFormat::NV12) {
+            encoderSettings.outputFormat = PixelFormat::BGRA8;
+            encoder_->open(encoderSettings);
+        }
+
+        if (!gif && !muxer_->hardwareVideoEncoder()) {
+            encoderWarning = QStringLiteral("硬體視訊編碼不可用，改用軟體編碼，可能較耗 CPU");
         }
 
         muxerReady_ = true;
@@ -507,13 +559,23 @@ private:
                     break;
                 }
             }
+            bool audioFailed = false;
             while (audioQueue_.pop(audio)) {
                 packet = {};
                 packet.kind = PacketKind::Audio;
                 packet.timestampNs = audio.timestampNs;
                 packet.durationNs = pcmDurationNs(audio);
                 packet.bytes = std::move(audio.bytes);
-                muxer_->writeAudio(packet);
+                if (!muxer_->writeAudio(packet) && !stop_.load()) {
+                    fail(muxer_->lastError().isEmpty()
+                             ? QStringLiteral("寫入音訊失敗")
+                             : muxer_->lastError());
+                    audioFailed = true;
+                    break;
+                }
+            }
+            if (audioFailed) {
+                break;
             }
         }
 
@@ -566,7 +628,7 @@ private:
     std::unique_ptr<IMuxer> muxer_;
     WatermarkOverlay watermark_;
     FrameQueue<VideoFrame> videoQueue_{4};
-    FrameQueue<AudioFrame> audioQueue_{8};
+    FrameQueue<AudioFrame> audioQueue_{32};
     std::thread captureThread_;
     std::thread audioThread_;
     std::thread encodeThread_;
@@ -583,6 +645,8 @@ private:
     std::atomic<bool> audioReady_{false};
     std::atomic<bool> audioFailed_{false};
     std::atomic<bool> muxerReady_{false};
+    std::atomic<std::int64_t> pauseOffsetNs_{0};
+    std::atomic<std::int64_t> pauseStartedNs_{0};
     bool wantAudio_{false};
     bool mfStarted_{false};
 };
@@ -599,7 +663,7 @@ RecordingSession::RecordingSession(QObject* parent)
 
 RecordingSession::~RecordingSession()
 {
-    stop();
+    waitUntilStopped();
 }
 
 bool RecordingSession::start(const RecordingRequest& request)
@@ -635,6 +699,15 @@ bool RecordingSession::start(const RecordingRequest& request)
 
     outputPath_ = pipeline_->outputPath;
     setState(State::Recording);
+    if (!pipeline_->audioWarning.isEmpty()) {
+        emit warningOccurred(pipeline_->audioWarning);
+    }
+    if (!pipeline_->captureWarning.isEmpty()) {
+        emit warningOccurred(pipeline_->captureWarning);
+    }
+    if (!pipeline_->encoderWarning.isEmpty()) {
+        emit warningOccurred(pipeline_->encoderWarning);
+    }
     return true;
 #endif
 }
@@ -686,24 +759,45 @@ void RecordingSession::stop()
         }
         return;
     }
+    if (state_ == State::Stopping) {
+        return;
+    }
 
 #ifdef Q_OS_WIN
     pipeline_->requestStop();
-    pipeline_->joinWorkers();
-    const QString path = pipeline_->outputPath;
-    const QString err = pipeline_->error;
-    pipeline_.reset();
-    outputPath_ = path;
-    setState(State::Idle);
-    if (!err.isEmpty()) {
-        emit errorOccurred(err);
-    }
-    emit recordingFinished(path);
+    setState(State::Stopping);
 #else
     pipeline_.reset();
     setState(State::Idle);
     emit recordingFinished({});
 #endif
+}
+
+void RecordingSession::waitUntilStopped()
+{
+#ifdef Q_OS_WIN
+    if (pipeline_) {
+        pipeline_->requestStop();
+        pipeline_->joinWorkers();
+        outputPath_ = pipeline_->outputPath;
+        pipeline_.reset();
+    }
+#else
+    pipeline_.reset();
+#endif
+    if (state_ != State::Idle) {
+        setState(State::Idle);
+    }
+}
+
+std::uint64_t RecordingSession::droppedFrames() const
+{
+#ifdef Q_OS_WIN
+    if (pipeline_) {
+        return pipeline_->dropped();
+    }
+#endif
+    return 0;
 }
 
 void RecordingSession::onWorkerDone(const QString& path, const QString& error)

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Recording status shows dropped frames when the capture queue overruns
+- Non-fatal `warningOccurred` when audio init fails, capture falls back to GDI, or MP4 uses software H.264
+
+### Fixed
+
+- Pause no longer stretches the last video sample across the pause; mux timestamps skip paused time
+- Stop no longer joins encoder finalize on the UI thread (new `Stopping` state)
+- VFR matches oCam Fast: only unique desktop presents are encoded (no cursor-only frames); in-recording screenshots reuse the last mapped frame instead of waiting out a timeout
+- VFR desktop presents are capped at the configured FPS instead of mapping every DXGI update (high-refresh displays)
+- DXGI `ACCESS_LOST` rebuilds Desktop Duplication instead of aborting the recording
+- Audio write failures stop the session instead of dropping samples silently
+- Audio queue waits instead of dropping PCM when the encoder is briefly behind
+- DXGI / WASAPI waits are ~16 ms so Stop is not stalled on a 200 ms acquire timeout
+
+### Changed
+
+- MP4 encoding enables Media Foundation low-latency mode and requests zero B-frames
+- Default recording quality is `high` (was `very-high`)
+- MP4 encode path prefers NV12 into IMFSinkWriter; GPU crop uses `CopySubresourceRegion`
+- WASAPI capture uses event callback and QPC timestamps aligned to the video clock
+- Main window is excluded from capture (`WDA_EXCLUDEFROMCAPTURE`)
 - Screenshots work while recording or paused (copies the live capture frame; GDI fallback because DXGI Desktop Duplication is already in use)
 - Settings **Time limit** page: enable a recording duration (minutes/seconds; pause time does not count) and choose what happens after a successful stop — do nothing, start a new recording, quit, shut down, or sleep (Windows)
 - Settings **Watermark** page: enable an image overlay (PNG / JPG / BMP with alpha), opacity, X/Y position, and optional application to screenshots
@@ -19,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings **Capture** page: include-cursor toggle and image format (PNG / JPG / BMP)
 - Settings **Audio** page: system audio toggle, WASAPI microphone device list, left/right/stereo input source — mixed into one AAC track on the next recording
 - Settings dialog uses the main window chrome (teal header, mode pills, chip buttons)
-- Recording **General** page: cursor/always-on-top/tray toggles, FPS, quality, keyframe interval, resolution align, VFR/CFR — applied on the next recording (or immediately for window/tray chrome)
+- Recording **General** page: cursor/always-on-top/tray toggles, FPS (1–240, default 60), quality, keyframe interval, resolution align, VFR/CFR — applied on the next recording (or immediately for window/tray chrome)
 - Settings **GIF** page: include-cursor toggle and FPS (1–60), stored as `gif.*` and used when the output format is GIF
 - Toolbar output format menu includes **GIF (.GIF)**; recording writes a silent GIF89a file via a custom Median Cut + LZW encoder
 - Settings dialog now has all ten category pages (Recording, Audio, Capture, GIF, Hotkeys, Save, Time limit, Watermark, Performance, Language)

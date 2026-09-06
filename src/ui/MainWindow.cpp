@@ -18,6 +18,9 @@
 #include "core/VideoFrame.h"
 #include <windows.h>
 #include <powrprof.h>
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
 #endif
 
 #include <QAction>
@@ -62,6 +65,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <cstdint>
 
 namespace ors {
 namespace {
@@ -202,6 +206,19 @@ QSize regionPresetSize(const QString& preset)
 
 } // namespace
 
+#ifdef Q_OS_WIN
+void excludeFromCapture(QWidget* widget)
+{
+    if (!widget) {
+        return;
+    }
+    const HWND hwnd = reinterpret_cast<HWND>(widget->winId());
+    if (hwnd) {
+        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+    }
+}
+#endif
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
@@ -211,6 +228,11 @@ MainWindow::MainWindow(QWidget* parent)
     hotkeys_.setHandler([this](HotkeyAction action) { onHotkey(action); });
 
     connect(&session_, &RecordingSession::errorOccurred, this, &MainWindow::onSessionError);
+    connect(&session_, &RecordingSession::warningOccurred, this, [this](const QString& message) {
+        if (metaLabel_) {
+            metaLabel_->setText(message);
+        }
+    });
     connect(&session_, &RecordingSession::stateChanged, this, [this](RecordingSession::State) {
         updateChrome();
     });
@@ -520,6 +542,9 @@ void MainWindow::applyConfigToUi()
         if (visible) {
             show();
         }
+#ifdef Q_OS_WIN
+        excludeFromCapture(this);
+#endif
     }
 
     applyTrayFromConfig();
@@ -591,19 +616,26 @@ bool MainWindow::saveConfig()
 
 void MainWindow::updateChrome()
 {
-    const bool idle = session_.state() == RecordingSession::State::Idle;
-    const bool recording = session_.state() == RecordingSession::State::Recording;
-    const bool paused = session_.state() == RecordingSession::State::Paused;
+    const auto state = session_.state();
+    const bool idle = state == RecordingSession::State::Idle;
+    const bool recording = state == RecordingSession::State::Recording;
+    const bool paused = state == RecordingSession::State::Paused;
+    const bool stopping = state == RecordingSession::State::Stopping;
     const bool live = !idle;
     setWindowTitle(tr("ORS"));
     statusLabel_->setText(stateText());
     timerLabel_->setText(formatElapsed(currentElapsedMs()));
-    metaLabel_->setText(idleMetaText());
+    if (idle) {
+        metaLabel_->setText(idleMetaText());
+    }
 
-    recordButton_->setText(idle ? tr("錄製") : tr("停止"));
-    recordButton_->setIcon(toolbarIcon(idle ? ToolbarGlyph::Record : ToolbarGlyph::Stop, 28, kRecordIcon));
-    recordButton_->setToolTip(idle ? tr("錄製") : tr("停止"));
-    pauseButton_->setVisible(live);
+    recordButton_->setEnabled(!stopping);
+    recordButton_->setText(idle ? tr("錄製") : (stopping ? tr("停止中") : tr("停止")));
+    recordButton_->setIcon(toolbarIcon(
+        idle ? ToolbarGlyph::Record : ToolbarGlyph::Stop, 28, kRecordIcon));
+    recordButton_->setToolTip(idle ? tr("錄製") : (stopping ? tr("停止中") : tr("停止")));
+    pauseButton_->setVisible(live && !stopping);
+    pauseButton_->setEnabled(!stopping);
     pauseButton_->setText(paused ? tr("繼續") : tr("暫停"));
     pauseButton_->setIcon(toolbarIcon(paused ? ToolbarGlyph::Resume : ToolbarGlyph::Pause, 28, kIconColor));
     pauseButton_->setToolTip(paused ? tr("繼續") : tr("暫停"));
@@ -683,7 +715,7 @@ void MainWindow::updateOverlayVisibility()
     const bool selecting = selector_ && selector_->isVisible();
     overlay_->setVisible(screenTab && !selecting && !settingsOpen_);
     overlay_->setInteractive(session_.state() == RecordingSession::State::Idle);
-    overlay_->setRecording(session_.state() == RecordingSession::State::Recording);
+    overlay_->setRecording(session_.state() != RecordingSession::State::Idle);
     if (overlay_->isVisible()) {
         overlay_->raise();
     }
@@ -825,6 +857,9 @@ QRect MainWindow::presetRegionRect(const QString& preset) const
 
 void MainWindow::onRecord()
 {
+    if (session_.state() == RecordingSession::State::Stopping) {
+        return;
+    }
     if (session_.state() != RecordingSession::State::Idle) {
         session_.stop();
         return;
@@ -1308,6 +1343,8 @@ QString MainWindow::stateText() const
         return tr("錄製中");
     case RecordingSession::State::Paused:
         return tr("已暫停");
+    case RecordingSession::State::Stopping:
+        return tr("停止中");
     case RecordingSession::State::Idle:
     default:
         return tr("就緒");
@@ -1354,7 +1391,12 @@ QString MainWindow::recordingStatsText() const
             freeBytes = storage.bytesAvailable();
         }
     }
-    return tr("%1 / %2").arg(formatByteSize(fileBytes), formatByteSize(freeBytes));
+    QString text = tr("%1 / %2").arg(formatByteSize(fileBytes), formatByteSize(freeBytes));
+    const std::uint64_t dropped = session_.droppedFrames();
+    if (dropped > 0) {
+        text += tr(" · 丟 %1 幀").arg(dropped);
+    }
+    return text;
 }
 
 void MainWindow::updateRecordingStats()
@@ -1368,6 +1410,9 @@ void MainWindow::updateRecordingStats()
 void MainWindow::showEvent(QShowEvent* event)
 {
     QMainWindow::showEvent(event);
+#ifdef Q_OS_WIN
+    excludeFromCapture(this);
+#endif
     updateOverlayVisibility();
 }
 
@@ -1389,6 +1434,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
     if (session_.state() != RecordingSession::State::Idle) {
         session_.stop();
+        session_.waitUntilStopped();
     }
     persistOverlayRect(config_.data().regionPreset == QLatin1String("custom"));
     saveConfig();

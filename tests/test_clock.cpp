@@ -23,3 +23,10 @@ TEST_CASE("monotonicTimestampNs clamps backwards or duplicate timestamps")
     REQUIRE(ors::monotonicTimestampNs(10'000'000, 8'000'000, 1'000'000) == 11'000'000);
     REQUIRE(ors::monotonicTimestampNs(10'000'000, 10'000'000, 1'000'000) == 11'000'000);
 }
+
+TEST_CASE("adjustPausedTimestampNs subtracts accumulated pause time")
+{
+    REQUIRE(ors::adjustPausedTimestampNs(20'000'000, 5'000'000) == 15'000'000);
+    REQUIRE(ors::adjustPausedTimestampNs(4'000'000, 5'000'000) == 0);
+    REQUIRE(ors::adjustPausedTimestampNs(20'000'000, 0) == 20'000'000);
+}

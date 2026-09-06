@@ -281,11 +281,13 @@ TEST_CASE("containerExtension maps mp4 wmv and gif")
     REQUIRE(ors::Config::containerExtension(QStringLiteral("avi")) == QStringLiteral(".mp4"));
 }
 
-TEST_CASE("normalizedFrameRate clamps recording and GIF to 1-60")
+TEST_CASE("normalizedFrameRate clamps recording to 1-240 and GIF to 1-60")
 {
     REQUIRE(ors::Config::normalizedFrameRate(0) == 1);
     REQUIRE(ors::Config::normalizedFrameRate(60) == 60);
-    REQUIRE(ors::Config::normalizedFrameRate(120) == 60);
+    REQUIRE(ors::Config::normalizedFrameRate(120) == 120);
+    REQUIRE(ors::Config::normalizedFrameRate(240) == 240);
+    REQUIRE(ors::Config::normalizedFrameRate(241) == 240);
     REQUIRE(ors::Config::normalizedGifFrameRate(0) == 1);
     REQUIRE(ors::Config::normalizedGifFrameRate(10) == 10);
     REQUIRE(ors::Config::normalizedGifFrameRate(50) == 50);

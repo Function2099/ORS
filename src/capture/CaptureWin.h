@@ -15,10 +15,12 @@ public:
     bool start(const CaptureSettings& settings) override;
     void stop() override;
     GrabResult grab(VideoFrame& out) override;
+    GrabResult grab(VideoFrame& out, bool copyPixels, bool emitCachedOnIdle = false);
     GrabResult grabStill(VideoFrame& out, int timeoutMs);
 
     int width() const;
     int height() const;
+    bool softwareFallback() const;
     QString lastError() const;
 
 private:

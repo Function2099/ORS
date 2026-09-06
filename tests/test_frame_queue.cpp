@@ -3,6 +3,7 @@
 #include "core/VideoFrame.h"
 
 #include <chrono>
+#include <thread>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
@@ -71,6 +72,43 @@ TEST_CASE("FrameQueue clear empties without resetting dropped count")
     queue.clear();
     REQUIRE(queue.size() == 0);
     REQUIRE(queue.dropped() == 1);
+}
+
+TEST_CASE("FrameQueue pushWait blocks until there is space")
+{
+    ors::FrameQueue<int> queue(1);
+    queue.push(1);
+
+    std::thread consumer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        int value = 0;
+        REQUIRE(queue.pop(value));
+        REQUIRE(value == 1);
+    });
+
+    REQUIRE(queue.pushWait(2));
+    consumer.join();
+
+    int value = 0;
+    REQUIRE(queue.pop(value));
+    REQUIRE(value == 2);
+    REQUIRE(queue.dropped() == 0);
+}
+
+TEST_CASE("FrameQueue pushWait returns false after wake")
+{
+    ors::FrameQueue<int> queue(1);
+    queue.push(1);
+
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        queue.wake();
+    });
+
+    REQUIRE_FALSE(queue.pushWait(2));
+    stopper.join();
+    REQUIRE(queue.size() == 1);
+    REQUIRE(queue.dropped() == 0);
 }
 
 TEST_CASE("sampleDurationNs uses the gap to the next frame")

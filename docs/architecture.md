@@ -30,20 +30,20 @@ Windows-only sources (`CaptureWin`, `AudioCaptureWin`, `Mp4Muxer`) are compiled 
 ```
 Idle ──start──▶ Recording ──pause──▶ Paused ──resume──▶ Recording
   ▲                  │                                      │
-  └───────stop───────┴──────────────────stop─────────────────┘
+  └── Stopping ◀──stop──┴──────────────────────────────stop──┘
 ```
 
-`RecordingSession` exposes `start(RecordingRequest)` / `pause` / `resume` / `stop` and signals `stateChanged`, `errorOccurred`, `recordingFinished`.
+`RecordingSession` exposes `start(RecordingRequest)` / `pause` / `resume` / `stop` / `waitUntilStopped` and signals `stateChanged`, `errorOccurred`, `warningOccurred`, `recordingFinished`. `stop()` is non-blocking: it requests workers to finish and enters `Stopping`; `onWorkerDone` joins, finalizes the file, then returns to `Idle`. The destructor and window close call `waitUntilStopped()`.
 
-Phase 1 UI wires start/stop. While recording or paused, the main window keeps its size and chrome; the action row shows only Stop / Pause / Screenshot, with current file size and free disk space on the right (refreshed every `recording.storageUpdateSeconds`). Pause/resume remain available on the session API and the Pause button. When `timeLimit.enabled` is true, the main-window elapsed timer (pause time excluded) calls `stop()` at the configured duration and then runs `timeLimit.action` only if the file was saved.
+Phase 1 UI wires start/stop. While recording or paused, the main window keeps its size and chrome; the action row shows only Stop / Pause / Screenshot, with current file size and free disk space on the right (refreshed every `recording.storageUpdateSeconds`). Dropped video frames are appended when the capture queue overruns. Pause/resume remain available on the session API and the Pause button; mux timestamps subtract accumulated pause time so the file does not contain a freeze. When `timeLimit.enabled` is true, the main-window elapsed timer (pause time excluded) calls `stop()` at the configured duration and then runs `timeLimit.action` only if the file was saved.
 
 ## Frames and packets
 
 - `VideoFrame`: CPU buffer (`BGRA8` from DXGI, timestamp, width/height/stride, bytes).
 - `AudioFrame`: PCM s16 stereo payload plus sample rate.
-- `EncodedPacket`: packed BGRA video (pre-H.264) or PCM audio consumed by `IMuxer`.
+- `EncodedPacket`: NV12 video for MP4 (BGRA for GIF) or PCM audio consumed by `IMuxer`.
 
-`FrameQueue<T>` is a thread-safe bounded deque (default capacity 4). When full it drops the oldest frame and increments `dropped()`. `waitPop` blocks with a timeout; `wake` unblocks waiters on stop.
+- `FrameQueue`: thread-safe bounded deque (video default capacity 4). Video `push` drops the oldest frame and increments `dropped()`. Audio `pushWait` blocks instead of dropping. `waitPop` blocks with a timeout; `wake` unblocks waiters on stop.
 
 ## Capture / encode / mux contracts
 
@@ -52,7 +52,7 @@ Phase 1 UI wires start/stop. While recording or paused, the main window keeps it
 - `IEncoder::open` / `encode` / `flush` / `close`.
 - `IMuxer::open` / `writeVideo` / `writeAudio` / `finalize`.
 
-Phase 1 uses **IMFSinkWriter** to compress packed BGRA (`MFVideoFormat_RGB32`) to H.264 and PCM to AAC while writing MP4. `MFEncoder` copies frames to a tightly packed even-sized buffer.
+Phase 1 uses **IMFSinkWriter** to compress NV12 (falling back to packed BGRA / `MFVideoFormat_RGB32`) to H.264 and PCM to AAC while writing MP4. `MFEncoder` converts BGRA to NV12 for MP4, or moves packed BGRA for GIF.
 
 ## Config (`%APPDATA%/ORS/config.json`)
 
@@ -75,8 +75,8 @@ Schema version `1`. Later phases add keys; they do not rename existing ones.
 | `recording.includeCursor` | `true` | DXGI frames composite the cursor with `GetCursorInfo` / `DrawIconEx` |
 | `recording.alwaysOnTop` | `false` | Main window stays on top |
 | `recording.useTrayIcon` / `hideWhenMinimized` / `hideOnStartup` | `true` / `false` / `false` | System tray; minimize or start hidden when the tray is available |
-| `recording.frameRate` | `60` | Capture / encode FPS, clamped to 1–60 |
-| `recording.quality` | `very-high` | `very-high` / `high` / `medium` / `low` / `custom` |
+| `recording.frameRate` | `60` | Capture / encode FPS, clamped to 1–240 |
+| `recording.quality` | `high` | `very-high` / `high` / `medium` / `low` / `custom` |
 | `recording.customBitrateKbps` | `12000` | Used when quality is `custom` |
 | `recording.keyframeInterval` | `5` | Seconds between keyframes; GOP frames = interval × FPS |
 | `recording.resolutionAlign` | `8x4` | `8x4` / `2x2` / `16x16` |
@@ -104,10 +104,10 @@ Capture thread ──▶ FrameQueue ──▶ Encode/mux thread ──▶ MP4 or
 Audio capture  ──▶ AudioQueue ──┘   (skipped for GIF)
 ```
 
-- Capture: DXGI Desktop Duplication (default) or GDI BitBlt when `performance.captureMode` is `gdi`, on the monitor that overlaps the selected region; CPU crop to even width/height. Optional cursor overlay (drawn into a cursor-sized DIB, not a full-frame copy). `cfr` reuses the last frame on a 1/FPS deadline so the encoder keeps a steady rate; `vfr` waits up to 200 ms for the next desktop present (same idea as oCam “Variable Frame Rate (Fast)”) and only emits when the desktop or cursor updates. GDI has no update event, so it always captures at the target FPS. MP4 sample duration is the timestamp gap to the next unique frame, not a fixed 1/FPS slot. GIF recording forces CFR and uses `gif.frameRate` / `gif.includeCursor`. Optional watermark overlay after grab. The toolbar screenshot hides the region overlay and writes PNG / JPG / BMP with `QImage`. While idle it waits for a real desktop present (`grabStill`; skips empty DXGI frames, forces opaque alpha, falls back to GDI if idle). While recording or paused it copies the live capture frame (`snapshotFrame`) so DXGI is not duplicated, then falls back to GDI.
-- Audio: WASAPI loopback when `audio.system` is true and/or the selected microphone when `audio.microphoneId` is set. The two streams are mixed into one stereo PCM track (mic left/right/stereo mapping applied first). Audio init failure falls back to video-only; one audio source failing does not drop the other. GIF output has no audio track.
-- Encode/mux: one worker packs BGRA. MP4 writes via IMFSinkWriter (hardware transforms when available); GOP size follows `recording.keyframeInterval`. Queue depth follows `performance.pipelineLayers`. GIF uses a custom Median Cut + LZW encoder (`GifEncoder`).
-- UI stays on the Qt main thread after start returns.
+- Capture: DXGI Desktop Duplication (default) or GDI BitBlt when `performance.captureMode` is `gdi`, on the monitor that overlaps the selected region. GPU `CopySubresourceRegion` downloads only the even-sized crop; HDR / non-BGRA formats are converted with the D3D11 video processor, otherwise the session falls back to GDI. `ACCESS_LOST` rebuilds Desktop Duplication and falls back to GDI. Optional cursor overlay uses a cached cursor-sized DIB. `cfr` reuses the last frame on a 1/FPS deadline; `vfr` waits for the next desktop present (oCam “Variable Frame Rate (Fast)”) and maps unique desktop frames at most at the target FPS (1–240). Cursor-only DXGI updates are not emitted. GDI has no update event, so it always captures at the target FPS. Acquire waits are ~16 ms so Stop can return quickly. Pause skips the CPU Map (snapshot excepted) and mux timestamps omit pause time. MP4 sample duration is the timestamp gap to the next unique frame. GIF recording forces CFR and uses `gif.frameRate` / `gif.includeCursor`. Optional watermark overlay after grab. The toolbar screenshot hides the region overlay and writes PNG / JPG / BMP with `QImage`. The main window uses `WDA_EXCLUDEFROMCAPTURE`. While idle it waits for a real desktop present (`grabStill`; skips empty DXGI frames, forces opaque alpha, falls back to GDI if idle). While recording or paused it copies the live capture frame (`snapshotFrame`), reusing the last mapped frame when VFR has no new present.
+- Audio: WASAPI loopback when `audio.system` is true and/or the selected microphone when `audio.microphoneId` is set, using event-callback capture and QPC timestamps aligned to the video clock. Grab waits are ~16 ms. The two streams are mixed into one stereo PCM track (mic left/right/stereo mapping applied first). The audio queue blocks when full instead of dropping samples. Audio init failure records video-only and emits `warningOccurred`; one audio source failing does not drop the other. GIF output has no audio track.
+- Encode/mux: one worker converts BGRA to NV12 for MP4 (RGB32 input if the sink writer rejects NV12) or packed BGRA for GIF. MP4 writes via IMFSinkWriter (hardware transforms when available) with `MF_LOW_LATENCY`, no B-frames, and GOP size from `recording.keyframeInterval`. A software H.264 fallback emits `warningOccurred`. Queue depth follows `performance.pipelineLayers`. GIF uses a custom Median Cut + LZW encoder (`GifEncoder`).
+- UI stays on the Qt main thread after start returns. Stop does not join workers on the UI thread.
 
 Known Phase 1 limits: no multi-monitor spanning in one file (the output with the largest overlap is captured), game/audio tabs and WMV are not wired yet. Hardware H.264 encoders may ignore GOP size and encoder thread count. GIF does not resize frames.
 

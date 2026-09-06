@@ -128,7 +128,7 @@ int Config::normalizedFrameRate(int frameRate)
 
 int Config::normalizedGifFrameRate(int frameRate)
 {
-    return normalizedFrameRate(frameRate);
+    return std::clamp(frameRate, kMinFrameRate, kMaxGifFrameRate);
 }
 
 int Config::normalizedStorageUpdateSeconds(int seconds)

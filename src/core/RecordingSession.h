@@ -7,6 +7,7 @@
 
 #include <QObject>
 #include <QString>
+#include <cstdint>
 #include <memory>
 
 namespace ors {
@@ -33,6 +34,7 @@ public:
         Idle,
         Recording,
         Paused,
+        Stopping,
     };
     Q_ENUM(State)
 
@@ -41,11 +43,13 @@ public:
 
     State state() const { return state_; }
     QString outputPath() const { return outputPath_; }
+    std::uint64_t droppedFrames() const;
 
     bool start(const RecordingRequest& request);
     void pause();
     void resume();
     void stop();
+    void waitUntilStopped();
     bool snapshotFrame(VideoFrame& out);
 
     Q_INVOKABLE void onWorkerDone(const QString& path, const QString& error);
@@ -53,6 +57,7 @@ public:
 signals:
     void stateChanged(ors::RecordingSession::State state);
     void errorOccurred(const QString& message);
+    void warningOccurred(const QString& message);
     void recordingFinished(const QString& path);
 
 private:
