@@ -47,6 +47,22 @@ The `ORS.exe` output is `ignore/build/ORS.exe` (Ninja). A `POST_BUILD` step runs
 
 Visual Studio multi-config generators place the binary at `ignore/build/Release/ORS.exe`.
 
+## Portable zip
+
+After a Release build, pack only the runtime files (not the CMake tree):
+
+```powershell
+powershell -File scripts/pack-windows.ps1
+```
+
+Output:
+
+- `ignore/out/ORS-<version>-win64/` — folder you can run
+- `ignore/out/ORS-<version>-win64.zip` — same folder, zipped
+- `ignore/out/ORS-<version>-win64.zip.sha256` — SHA-256 of the zip
+
+Push a git tag `v0.1.0` to let GitHub Actions build, pack, and attach the zip to a Release. Do not commit `ignore/out/`.
+
 ## CMake targets
 
 | Target | Purpose |

@@ -1,20 +1,61 @@
 name: Bug report
-description: Report a bug in ORS
+description: Report something that already exists but does not work
 title: "[Bug]: "
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [README — Not implemented yet](https://github.com/Function2099/ORS/blob/master/README.md#not-implemented-yet) first. Game capture, audio-only, WMV, and other containers are known gaps, not bugs.
   - type: textarea
     id: description
     attributes:
       label: What happened?
+      description: What did you see, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ORS
+        2. Choose MP4 and the primary monitor
+        3. Press Record
     validations:
       required: true
   - type: input
     id: version
     attributes:
       label: ORS version
+      placeholder: "0.1.0 (commit hash if you built from source)"
+    validations:
+      required: true
   - type: input
     id: os
     attributes:
       label: OS version
-      placeholder: "Windows 11 23H2"
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: capture
+    attributes:
+      label: Capture mode
+      options:
+        - DXGI (default)
+        - GDI
+        - Not sure
+  - type: dropdown
+    id: format
+    attributes:
+      label: Output format
+      options:
+        - MP4
+        - GIF
+        - Other / not applicable
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: GPU, display refresh rate, HDR, multi-monitor layout, or a log snippet. Do not paste secrets.

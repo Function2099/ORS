@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-zip:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          archives: qtbase qttools qtsvg
+          cache: true
+
+      - name: Configure
+        run: cmake -B ignore/build -S . -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build ignore/build --config Release
+
+      - name: Test
+        run: ctest --test-dir ignore/build -C Release --output-on-failure
+
+      - name: Pack zip
+        shell: pwsh
+        run: ./scripts/pack-windows.ps1 -BuildDir ignore/build
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ORS-win64
+          path: |
+            ignore/out/*.zip
+            ignore/out/*.sha256
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem ignore/out/ORS-*-win64.zip | Select-Object -First 1
+          $sum = Get-ChildItem ignore/out/ORS-*-win64.zip.sha256 | Select-Object -First 1
+          $tag = "${{ github.ref_name }}"
+          $notesPath = "ignore/out/release-notes.md"
+          @(
+            "Portable Windows x64 zip (unsigned). Extract the folder and run ORS.exe."
+            ""
+            "Windows SmartScreen may warn because this build is not code-signed. If you got the file from this Releases page, use More info → Run anyway."
+            ""
+            "未簽署的 Windows x64 免安裝包。請解壓整個資料夾後執行 ORS.exe。若出現未知發行者警告，且檔案來自本頁，可選「其他資訊」→「仍要執行」。"
+          ) | Set-Content -Path $notesPath -Encoding utf8
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip.FullName $sum.FullName --clobber
+          } else {
+            gh release create $tag $zip.FullName $sum.FullName --title $tag --notes-file $notesPath
+          }

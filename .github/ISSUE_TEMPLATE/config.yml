@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/Function2099/ORS/blob/master/README.md
+    about: Build steps, current features, and what is not implemented yet
+  - name: Project plan
+    url: https://github.com/Function2099/ORS/blob/master/screen-recorder-plan.md
+    about: Original roadmap and phase list (Traditional Chinese)

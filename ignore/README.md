@@ -8,7 +8,7 @@ Everything under this directory is gitignored except this README.
 ignore/
 ├── README.md          # this file (tracked)
 ├── build/             # CMake build tree: cmake -B ignore/build -S .
-├── out/               # optional install / package output
+├── out/               # portable zip: scripts/pack-windows.ps1
 ├── ide/               # optional: copy or symlink IDE caches if you want them here
 └── local/             # personal notes, scratch files, secrets — never commit
 ```

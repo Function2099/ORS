@@ -8,8 +8,12 @@ Third-party components
 
 Qt 6
   License: GNU Lesser General Public License v3 (LGPL v3)
-  Usage: dynamically linked
+  Usage: dynamically linked (not statically linked into ORS)
   Source: https://www.qt.io/download
+
+Catch2 (test runner only; not shipped in ORS.exe)
+  License: Boost Software License 1.0
+  Source: https://github.com/catchorg/Catch2
 
 Windows SDK APIs (DXGI, WASAPI, Media Foundation, Windows Graphics Capture)
   License: Microsoft Windows SDK license terms

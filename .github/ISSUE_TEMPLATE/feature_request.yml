@@ -3,6 +3,10 @@ description: Suggest an idea for ORS
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Planned but unfinished work is listed in the [README](https://github.com/Function2099/ORS/blob/master/README.md#not-implemented-yet) and [project plan](https://github.com/Function2099/ORS/blob/master/screen-recorder-plan.md). Say if you want to help implement one of those items.
   - type: textarea
     id: problem
     attributes:
@@ -13,3 +17,17 @@ body:
     id: solution
     attributes:
       label: Proposed solution
+      description: What should ORS do? Keep it specific (one feature per issue).
+    validations:
+      required: true
+  - type: dropdown
+    id: listed
+    attributes:
+      label: Is this already on the unimplemented list?
+      options:
+        - "No / not sure"
+        - Game capture (WGC)
+        - Audio-only recording
+        - WMV or another container
+        - macOS or Linux
+        - Something else on the README list
